@@ -1,39 +1,38 @@
 {
     "jolly fellow": [
-        "nigger", "n1gger", "n!gger", "n*gger", "n1gg3r", "n!gg3r", "n*gg3r", "niggers", "n i g g e r"
+        "nigger", "n1gger", "n!gger", "n*gger", "n1gg3r", "n!gg3r", "n*gg3r", "niggers", "n i g g e r", "nigg3r"
     ],
     "hard worker": [
-        "spic", "sp1c", "sp!c", "sp*c", "spick", "sp1ck", "sp!ck", "sp*ck",
-        "wetback", "w3tback", "wetbak", "wetb4ck", "w3tb4ck"
+        "spic", "sp1c", "sp!c", "sp*c", "spick", "sp1ck", "sp!ck", "sp*ck", "spix",
+        "wetback", "w3tback", "wetbak", "wetb4ck", "w3tb4ck", "w*tback", "wetbacks"
     ],
     "eastern friend": [
         "chink", "ch1nk", "ch!nk", "ch*nk", "chinks",
-        "gook", "g00k", "gooker", "g00ker", ""
+        "gook", "g00k", "gooker", "g00ker"
     ],
     "brazilian": [
         "kike", "k1ke", "k!ke", "k*ke", "kikes"
     ],
-    "silly billy": [ 
-        "fag", "f@g", "f*ggot", "faggot", "f4g", "ph@g", "fags", "faggots",
-        "f@g", "f@ggit", "f@ggot", "f@ggots", "f@ggut", "f@git", "f@got", "f@gs", "f@gut", "faag", "faags", "fagg",
-         "faggit", "faggot", "faggots", "faggs", "faggut", "fay goat", "fay goats", "faygoat", "faygoats", "faygot", 
-         "faygots", "flaggit", "flaggits", "flaggot", "flaggots", "flagit", "flagits", "flagot", "flagots"
+    "silly billy": [
+        "fag", "f@g", "f4g", "ph@g", "fags", "faag", "faags", "fagg", "f4ggot", "phaggot",
+        "faggot", "f*ggot", "f@ggot", "faggots", "f@ggots",
+        "faggit", "f@ggit", "flaggit", "flaggits",
+        "faggs", "faggut", "f@ggut",
+        "faygot", "faygots", "faygoat", "faygoats",
+        "flagit", "flagits", "flagot", "flagots"
     ],
 
-
+    
     "family fight": [
         "racewar", "race war"
     ],
     "idubbbz": [
         "niggerfaggot"
     ],
-    "speedrunner": [
-        "femboy", "femboys"
+    "skirt fella": [
+        "femboy", "femboys", "tranny"
     ],
     "cringe meme": [
         "thugshaker", "thugshakers"
-    ],
-    "mobster": [
-        "goon", "gooning"
     ]
 }
