@@ -1,8 +1,8 @@
 Discord wordfilter that replaces words while appearing as much like origional poster as possible.
 
-Create a Discord API application, and feed private bot key,
-Create config.json:
+Create a Discord API application.
+Create config.json and enter your bot's token:
 
 {
-    "BOT_TOKEN": "MTM2NzI0OTMxOTAxNDQzMjg0OQ.GuPiVm.ylreDIhL_wzrcEi8zBpzDDZ0rf82tutizLQDUs"
+    "BOT_TOKEN": "BOT_TOKEN_HERE"
 }
