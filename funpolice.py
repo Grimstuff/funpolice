@@ -1,10 +1,10 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
+import discord # type: ignore
+from discord import app_commands # type: ignore
+from discord.ext import commands # type: ignore
 import re
 import json
 import os
-from discord.ui import Button, View
+from discord.ui import Button, View # type: ignore
 
 # Load secrets
 with open('secrets.json', 'r') as f:
