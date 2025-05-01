@@ -1,0 +1,2 @@
+2025-04-30 19:57:08,202 - discord.client - WARNING - PyNaCl is not installed, voice will NOT be supported
+2025-04-30 19:57:08,202 - WordFilterBot - INFO - Loaded 73 forbidden words
