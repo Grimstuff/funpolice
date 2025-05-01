@@ -27,11 +27,24 @@ def load_config():
 # Initial config load
 config, forbidden = load_config()
 
-# Compile regex pattern
+# Compile regex pattern - includes optional 's' at the end for plurals
 def update_pattern():
-    return r'\b(' + '|'.join(re.escape(word) for word in forbidden.keys()) + r')\b'
+    return r'\b(' + '|'.join(re.escape(word) + r's?' for word in forbidden.keys()) + r')\b'
 
 pattern = update_pattern()
+
+# Function to handle pluralization of replacements
+def pluralize_replacement(match, replacement):
+    # Check if the match ends with 's' and it's not part of the original word
+    if match.endswith('s') and match[:-1].lower() in forbidden:
+        # Simple English pluralization for the replacement
+        if replacement.endswith('y'):
+            return replacement[:-1] + 'ies'  # city -> cities
+        elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
+            return replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
+        else:
+            return replacement + 's'  # cat -> cats
+    return replacement
 
 # Set up the bot with intents
 intents = discord.Intents.default()
@@ -57,15 +70,49 @@ async def on_message(message):
         return
     
     original_content = message.content
-    match_content = re.sub(r'\s+', '', original_content)  # Remove spaces for terms like "n i g g e r"
-    new_content = re.sub(
-        pattern,
-        lambda m: forbidden[m.group(0).lower()],
-        match_content,
-        flags=re.IGNORECASE
-    )
+    match_content = original_content
+    nospace_content = re.sub(r'\s+', '', original_content)  # Remove spaces for terms like "n i g g e r"
     
-    if new_content != match_content:
+    # First check if there are words with spaces between letters
+    space_matches = re.findall(pattern, nospace_content, flags=re.IGNORECASE)
+    
+    # If we found matches in the no-space version but not in the original,
+    # it means there are words with spaces between letters
+    if space_matches:
+        # We need to replace the spaced version in the original content
+        for match in space_matches:
+            # Get the base form (without trailing 's' if it exists)
+            base_match = match[:-1] if match.endswith('s') and match[:-1].lower() in forbidden else match
+            replacement = forbidden.get(base_match.lower(), base_match)
+            
+            # Handle pluralization
+            if match.endswith('s') and match[:-1].lower() in forbidden:
+                replacement = pluralize_replacement(match, replacement)
+            
+            # Find the spaced version in the original content - this is tricky
+            # We'll use a regex that allows for spaces between characters
+            spaced_pattern = ''.join([c + r'\s*' for c in base_match[:-1]]) + base_match[-1]
+            if match.endswith('s') and match[:-1].lower() in forbidden:
+                spaced_pattern += r'\s*s'
+            
+            # Replace in the original content
+            match_content = re.sub(spaced_pattern, replacement, match_content, flags=re.IGNORECASE)
+    
+    # Now process regular matches
+    def replace_word(m):
+        match = m.group(0)
+        # Get the base form (without trailing 's' if it exists)
+        base_match = match[:-1] if match.endswith('s') and match[:-1].lower() in forbidden else match
+        replacement = forbidden.get(base_match.lower(), base_match)
+        
+        # Handle pluralization
+        if match.endswith('s') and match[:-1].lower() in forbidden:
+            return pluralize_replacement(match, replacement)
+        return replacement
+    
+    new_content = re.sub(pattern, replace_word, match_content, flags=re.IGNORECASE)
+    
+    if new_content != original_content:
         try:
             await message.delete()
         except discord.Forbidden:
@@ -77,8 +124,11 @@ async def on_message(message):
             await webhook.send(
                 content=new_content,
                 username=message.author.display_name,
-                avatar_url=message.author.avatar.url
+                avatar_url=message.author.avatar.url if message.author.avatar else None
             )
+    
+    # Process commands
+    await bot.process_commands(message)
 
 # Admin-only check for slash commands
 def is_admin():
