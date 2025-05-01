@@ -49,7 +49,18 @@ def pluralize_replacement(match, replacement):
 # Set up the bot with intents
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+# Using a non-standard prefix to avoid conflicts with other bots
+# We'll only use slash commands, but need to set a prefix for the Bot class
+bot = commands.Bot(command_prefix='__funpolice__', intents=intents, help_command=None)
+
+# Adding an event handler to suppress command not found errors
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        # Silently ignore command not found errors
+        return
+    # For other errors, print them to console
+    print(f"Command error: {error}")
 
 # Function to get or create a webhook
 async def get_webhook(channel):
@@ -127,8 +138,8 @@ async def on_message(message):
                 avatar_url=message.author.avatar.url if message.author.avatar else None
             )
     
-    # Process commands
-    await bot.process_commands(message)
+    # We don't process prefix commands since we're using only slash commands
+    # await bot.process_commands(message)
 
 # Admin-only check for slash commands
 def is_admin():
@@ -324,7 +335,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
     else:
-        raise error
+        # Log the error instead of raising it
+        print(f"Error in slash command: {error}")
+        await interaction.response.send_message("An error occurred while executing the command.", ephemeral=True)
 
 # Add commands to the bot's command tree
 bot.tree.add_command(add_filter)
