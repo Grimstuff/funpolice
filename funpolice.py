@@ -157,6 +157,25 @@ async def replacement_autocomplete(interaction: discord.Interaction, current: st
 
 # View class for pagination buttons
 class PaginationView(View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=60)  # 60-second timeout
+        self.user_id = user_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only the command issuer can use the buttons
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        self.stop()
+        await interaction.response.edit_message(content="Deletion confirmed!", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Deletion canceled.", view=None)
     def __init__(self, user_id: int, pages: list[discord.Embed], current_page: int = 0):
         super().__init__(timeout=300)  # 5-minute timeout
         self.user_id = user_id
@@ -189,37 +208,57 @@ class PaginationView(View):
         self.update_buttons()
         await interaction.response.edit_message(embed=self.pages[self.current_page], view=self)
 
-# Slash command to add a word to the filter
+# Slash command to add multiple words to the filter
 @app_commands.command(
     name="addfilter",
-    description="Add a word to the filter (admin only)."
+    description="Add one or more words to the filter (admin only)."
 )
 @is_admin()
 @app_commands.autocomplete(replacement=replacement_autocomplete)
 async def add_filter(
     interaction: discord.Interaction,
     replacement: str,
-    word: str
+    words: str
 ):
-    """Add a word to the filter under a replacement phrase."""
+    """Add multiple words to the filter under a replacement phrase.
+    Separate words with commas."""
     global config, forbidden, pattern
     
     # Normalize inputs
     replacement = replacement.strip()
-    word = word.lower().strip()
+    # Split by commas and remove whitespace from each word
+    word_list = [word.lower().strip() for word in words.split(',') if word.strip()]
+    
+    if not word_list:
+        await interaction.response.send_message("No valid words provided.", ephemeral=True)
+        return
+    
+    # Keep track of added words
+    added_words = []
+    already_filtered = []
     
     # Update config
     if replacement in config:
         if isinstance(config[replacement], list):
-            if word not in config[replacement]:
-                config[replacement].append(word)
-            else:
-                await interaction.response.send_message(f"Word '{word}' is already in the filter for '{replacement}'.", ephemeral=True)
-                return
+            for word in word_list:
+                if word not in config[replacement]:
+                    config[replacement].append(word)
+                    added_words.append(word)
+                else:
+                    already_filtered.append(word)
         else:
-            config[replacement] = [config[replacement], word]
+            # Convert single value to list and add new words
+            existing_word = config[replacement]
+            config[replacement] = [existing_word]
+            for word in word_list:
+                if word != existing_word:
+                    config[replacement].append(word)
+                    added_words.append(word)
+                else:
+                    already_filtered.append(word)
     else:
-        config[replacement] = [word]
+        config[replacement] = word_list
+        added_words = word_list
     
     # Save config
     with open('config.json', 'w') as f:
@@ -229,19 +268,29 @@ async def add_filter(
     config, forbidden = load_config()
     pattern = update_pattern()
     
-    await interaction.response.send_message(f"Added word '{word}' to filter with replacement '{replacement}'.", ephemeral=True)
+    # Prepare response message
+    response = []
+    if added_words:
+        response.append(f"Added {len(added_words)} word(s) to filter with replacement '{replacement}':")
+        response.append(", ".join(f"'{word}'" for word in added_words))
+    
+    if already_filtered:
+        words_with_quotes = [f"'{word}'" for word in already_filtered]
+        response.append(f"These words were already in the filter: {', '.join(words_with_quotes)}")
+    
+    await interaction.response.send_message("\n".join(response), ephemeral=True)
 
 # Slash command to remove a word from the filter
 @app_commands.command(
-    name="removefilter",
-    description="Remove a word from the filter (admin only)."
+    name="deletefilter",
+    description="Remove a specific word from the filter (admin only)."
 )
 @is_admin()
-async def remove_filter(
+async def delete_filter(
     interaction: discord.Interaction,
     word: str
 ):
-    """Remove a word from the filter."""
+    """Remove a specific word from the filter."""
     global config, forbidden, pattern
     
     word = word.lower().strip()
@@ -254,9 +303,11 @@ async def remove_filter(
             if not config[replacement]:  # Remove empty lists
                 del config[replacement]
             found = True
+            break
         elif isinstance(words, str) and words.lower() == word:
             del config[replacement]
             found = True
+            break
     
     if not found:
         await interaction.response.send_message(f"Word '{word}' not found in the filter.", ephemeral=True)
@@ -271,6 +322,67 @@ async def remove_filter(
     pattern = update_pattern()
     
     await interaction.response.send_message(f"Removed word '{word}' from the filter.", ephemeral=True)
+
+# New command to delete an entire replacement category
+@app_commands.command(
+    name="deletereplacement",
+    description="Delete an entire replacement category and all associated words (admin only)."
+)
+@is_admin()
+@app_commands.autocomplete(replacement=replacement_autocomplete)
+async def delete_replacement(
+    interaction: discord.Interaction,
+    replacement: str
+):
+    """Delete an entire replacement category and all associated words."""
+    global config, forbidden, pattern
+    
+    replacement = replacement.strip()
+    
+    if replacement not in config:
+        await interaction.response.send_message(f"Replacement category '{replacement}' not found.", ephemeral=True)
+        return
+    
+    # Get the words for confirmation message
+    words = config[replacement]
+    word_count = 1 if isinstance(words, str) else len(words)
+    words_str = words if isinstance(words, str) else ", ".join(words)
+    
+    # Create a warning message with confirmation button
+    warning_message = (
+        f"⚠️ **WARNING** ⚠️\n\n"
+        f"You are about to delete the replacement category '{replacement}' and ALL {word_count} associated word(s):\n"
+        f"```{words_str}```\n"
+        f"This action cannot be undone. Please confirm or cancel:"
+    )
+    
+    # Create confirmation view
+    view = ConfirmationView(user_id=interaction.user.id)
+    await interaction.response.send_message(warning_message, view=view, ephemeral=True)
+    
+    # Wait for interaction
+    await view.wait()
+    
+    # Check if confirmed
+    if not view.confirmed:
+        return  # User canceled or timed out
+    
+    # Delete the category
+    del config[replacement]
+    
+    # Save config
+    with open('config.json', 'w') as f:
+        json.dump(config, f, indent=4)
+    
+    # Reload forbidden and pattern
+    config, forbidden = load_config()
+    pattern = update_pattern()
+    
+    # Send follow-up message confirming deletion
+    await interaction.followup.send(
+        f"Successfully deleted replacement category '{replacement}' with {word_count} word(s).", 
+        ephemeral=True
+    )
 
 # Slash command to reload the config
 @app_commands.command(
@@ -329,6 +441,28 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
+# Create a confirmation button view for deletion
+class ConfirmationView(View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=60)  # 60-second timeout
+        self.user_id = user_id
+        self.confirmed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only the command issuer can use the buttons
+        return interaction.user.id == self.user_id
+
+    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.confirmed = True
+        self.stop()
+        await interaction.response.edit_message(content="Deletion confirmed!", view=None)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.stop()
+        await interaction.response.edit_message(content="Deletion canceled.", view=None)
+
 # Error handler for slash command checks
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -341,7 +475,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 # Add commands to the bot's command tree
 bot.tree.add_command(add_filter)
-bot.tree.add_command(remove_filter)
+bot.tree.add_command(delete_filter)
+bot.tree.add_command(delete_replacement)  # Add the new delete_replacement command
 bot.tree.add_command(reload_config)
 bot.tree.add_command(list_filters)
 

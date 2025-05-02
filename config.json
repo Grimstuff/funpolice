@@ -1,6 +1,6 @@
 {
     "Mizzer": [
-        "nigger",     
+        "nigger",
         "n1gger",
         "n!gger",
         "n*gger",
@@ -12,7 +12,7 @@
     ],
     "Mizza": [
         "nigga",
-        "niggaz",                   
+        "niggaz",
         "n1gga",
         "n!gga",
         "n*gga",
@@ -24,9 +24,9 @@
         "n!gga",
         "n*gga",
         "niggaz"
-    ],    
+    ],
     "hard worker": [
-        "spic",       
+        "spic",
         "sp1c",
         "sp!c",
         "sp*c",
@@ -42,7 +42,7 @@
         "w*tback"
     ],
     "eastern friend": [
-        "chink",     
+        "chink",
         "ch1nk",
         "ch!nk",
         "ch*nk",
@@ -54,7 +54,7 @@
         "g*ok"
     ],
     "brazilian": [
-        "kike",       
+        "kike",
         "k1ke",
         "k!ke",
         "k*ke",
@@ -62,7 +62,7 @@
         "k1kye"
     ],
     "silly billy": [
-        "fag",      
+        "fag",
         "f@g",
         "f4g",
         "ph@g",
@@ -90,12 +90,21 @@
     ],
     "skirt fella": [
         "femboy",
-        "femboys",        
+        "femboys",
         "fem boy",
         "tranny"
     ],
     "cringe meme": [
         "thugshaker",
         "thug shaker"
+    ],
+    "vape seller": [
+        "jeet",
+        "pajeet",
+        "dothead",
+        "dot head"
+    ],
+    "Amazon package": [
+        "paki"
     ]
 }
