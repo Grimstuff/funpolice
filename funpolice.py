@@ -132,14 +132,55 @@ async def on_message(message):
         
         webhook = await get_webhook(message.channel)
         if webhook:
-            await webhook.send(
-                content=new_content,
-                username=message.author.display_name,
-                avatar_url=message.author.avatar.url if message.author.avatar else None
-            )
-    
-    # We don't process prefix commands since we're using only slash commands
-    # await bot.process_commands(message)
+            # Check if the message is a reply
+            # Updated code using Discord's native quote formatting instead of embeds
+            if message.reference and message.reference.message_id:
+                try:
+                    # Try to fetch the message being replied to
+                    replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                    
+                    # Format for replied content - truncate if too long
+                    replied_content = replied_msg.content
+                    if not replied_content:  # Check if the message has no text content
+                        replied_content = "*[message had no text content]*"
+                    
+                    if len(replied_content) > 100:
+                        replied_content = replied_content[:100] + "..."
+                    
+                    # Create a quoted text format with cleaner mention handling
+                    # Format: > @Username: Message content  (if not a bot)
+                    # Format: > Username: Message content   (if a bot)
+                    if not replied_msg.author.bot:
+                        quoted_text = f"> {replied_msg.author.mention}: {replied_content}"
+                    else:
+                        quoted_text = f"> **{replied_msg.author.display_name}:** {replied_content}"
+                    
+                    # Combine quote with the filtered message
+                    # Single line break without extra space
+                    combined_content = f"{quoted_text}\n{new_content}"
+                    
+                    await webhook.send(
+                        content=combined_content,
+                        username=message.author.display_name,
+                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])  # Ensure only the replied user gets pinged
+                    )
+                except discord.NotFound:
+                    # If we can't find the replied message, just send the filtered message
+                    await webhook.send(
+                        content=new_content,
+                        username=message.author.display_name,
+                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                    )
+            else:
+                # Not a reply, just send the filtered message
+                await webhook.send(
+                    content=new_content,
+                    username=message.author.display_name,
+                    avatar_url=message.author.avatar.url if message.author.avatar else None,
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                )
 
 # Admin-only check for slash commands
 def is_admin():
@@ -157,25 +198,6 @@ async def replacement_autocomplete(interaction: discord.Interaction, current: st
 
 # View class for pagination buttons
 class PaginationView(View):
-    def __init__(self, user_id: int):
-        super().__init__(timeout=60)  # 60-second timeout
-        self.user_id = user_id
-        self.confirmed = False
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only the command issuer can use the buttons
-        return interaction.user.id == self.user_id
-
-    @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
-    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.confirmed = True
-        self.stop()
-        await interaction.response.edit_message(content="Deletion confirmed!", view=None)
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.stop()
-        await interaction.response.edit_message(content="Deletion canceled.", view=None)
     def __init__(self, user_id: int, pages: list[discord.Embed], current_page: int = 0):
         super().__init__(timeout=300)  # 5-minute timeout
         self.user_id = user_id
@@ -323,7 +345,7 @@ async def delete_filter(
     
     await interaction.response.send_message(f"Removed word '{word}' from the filter.", ephemeral=True)
 
-# New command to delete an entire replacement category
+# Command to delete an entire replacement category
 @app_commands.command(
     name="deletereplacement",
     description="Delete an entire replacement category and all associated words (admin only)."
@@ -476,7 +498,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # Add commands to the bot's command tree
 bot.tree.add_command(add_filter)
 bot.tree.add_command(delete_filter)
-bot.tree.add_command(delete_replacement)  # Add the new delete_replacement command
+bot.tree.add_command(delete_replacement)
 bot.tree.add_command(reload_config)
 bot.tree.add_command(list_filters)
 
