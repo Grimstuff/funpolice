@@ -176,7 +176,6 @@ async def on_message(message):
                 avatar_url = message.author.default_avatar.url if hasattr(message.author, 'default_avatar') else None
             
             # Check if the message is a reply
-            # Updated code using Discord's native quote formatting instead of embeds
             if message.reference and message.reference.message_id:
                 try:
                     # Try to fetch the message being replied to
@@ -190,26 +189,22 @@ async def on_message(message):
                     if len(replied_content) > 100:
                         replied_content = replied_content[:100] + "..."
                     
-                    # Get replied user's guild-specific avatar if applicable
-                    replied_avatar_url = get_avatar_url(replied_msg.author, message.guild)
-                    
-                    # Create a quoted text format with cleaner mention handling
-                    # Format: > @Username: Message content  (if not a bot)
-                    # Format: > Username: Message content   (if a bot)
-                    if not replied_msg.author.bot:
-                        quoted_text = f"> {replied_msg.author.mention}: {replied_content}"
-                    else:
-                        quoted_text = f"> **{replied_msg.author.display_name}:** {replied_content}"
+                    # Always use mention for the replied user, regardless of whether they're a bot or not
+                    quoted_text = f"> {replied_msg.author.mention}: {replied_content}"
                     
                     # Combine quote with the filtered message
-                    # Single line break without extra space
                     combined_content = f"{quoted_text}\n{new_content}"
                     
+                    # Ensure the mention works by explicitly allowing it
                     await webhook.send(
                         content=combined_content,
                         username=message.author.display_name,
                         avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])  # Ensure only the replied user gets pinged
+                        allowed_mentions=discord.AllowedMentions(
+                            users=[replied_msg.author],  # Explicitly allow mentioning the replied user
+                            everyone=False,
+                            roles=False
+                        )
                     )
                 except discord.NotFound:
                     # If we can't find the replied message, just send the filtered message
@@ -217,7 +212,7 @@ async def on_message(message):
                         content=new_content,
                         username=message.author.display_name,
                         avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
                     )
             else:
                 # Not a reply, just send the filtered message
@@ -225,7 +220,7 @@ async def on_message(message):
                     content=new_content,
                     username=message.author.display_name,
                     avatar_url=avatar_url,
-                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
                 )
 
 # Admin-only check for slash commands
