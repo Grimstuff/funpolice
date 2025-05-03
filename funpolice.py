@@ -74,6 +74,41 @@ async def get_webhook(channel):
         print(f"Cannot create webhook in {channel.name}. Ensure bot has 'Manage Webhooks' permission.")
         return None
 
+# Function to get the appropriate avatar URL (guild-specific if available)
+def get_avatar_url(user, guild):
+    """
+    Get the guild-specific avatar URL for a user if available, otherwise fall back to global avatar.
+    
+    Args:
+        user: The discord.User or discord.Member object
+        guild: The discord.Guild object
+    
+    Returns:
+        str: URL of the user's avatar (guild-specific if available)
+    """
+    # Make sure we have valid objects
+    if user is None or guild is None:
+        return None
+    
+    # If the user is already a member object with the right guild
+    if hasattr(user, 'guild') and user.guild.id == guild.id and user.guild_avatar:
+        return user.guild_avatar.url
+    
+    # Otherwise, try to get the member object from the guild
+    try:
+        member = guild.get_member(user.id)
+        if member and member.guild_avatar:
+            return member.guild_avatar.url
+    except:
+        pass
+    
+    # Fall back to global avatar
+    if hasattr(user, 'avatar') and user.avatar:
+        return user.avatar.url
+    
+    # Last resort: default avatar
+    return user.default_avatar.url if hasattr(user, 'default_avatar') else None
+
 # Event handler for new messages
 @bot.event
 async def on_message(message):
@@ -132,6 +167,14 @@ async def on_message(message):
         
         webhook = await get_webhook(message.channel)
         if webhook:
+            # Get the appropriate avatar URL (guild-specific if available)
+            avatar_url = get_avatar_url(message.author, message.guild)
+            
+            # If we couldn't get any avatar URL (unlikely but possible), use a default
+            if avatar_url is None:
+                # Discord's default avatar as a last resort
+                avatar_url = message.author.default_avatar.url if hasattr(message.author, 'default_avatar') else None
+            
             # Check if the message is a reply
             # Updated code using Discord's native quote formatting instead of embeds
             if message.reference and message.reference.message_id:
@@ -146,6 +189,9 @@ async def on_message(message):
                     
                     if len(replied_content) > 100:
                         replied_content = replied_content[:100] + "..."
+                    
+                    # Get replied user's guild-specific avatar if applicable
+                    replied_avatar_url = get_avatar_url(replied_msg.author, message.guild)
                     
                     # Create a quoted text format with cleaner mention handling
                     # Format: > @Username: Message content  (if not a bot)
@@ -162,7 +208,7 @@ async def on_message(message):
                     await webhook.send(
                         content=combined_content,
                         username=message.author.display_name,
-                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        avatar_url=avatar_url,
                         allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])  # Ensure only the replied user gets pinged
                     )
                 except discord.NotFound:
@@ -170,7 +216,7 @@ async def on_message(message):
                     await webhook.send(
                         content=new_content,
                         username=message.author.display_name,
-                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        avatar_url=avatar_url,
                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
                     )
             else:
@@ -178,7 +224,7 @@ async def on_message(message):
                 await webhook.send(
                     content=new_content,
                     username=message.author.display_name,
-                    avatar_url=message.author.avatar.url if message.author.avatar else None,
+                    avatar_url=avatar_url,
                     allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
                 )
 
