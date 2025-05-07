@@ -29,22 +29,27 @@ config, forbidden = load_config()
 
 # Compile regex pattern - includes optional 's' at the end for plurals
 def update_pattern():
-    return r'\b(' + '|'.join(re.escape(word) + r's?' for word in forbidden.keys()) + r')\b'
+    # We need a more specific pattern to properly handle plurals for case-insensitivity
+    # Create a pattern that will match both singular and plural forms explicitly
+    pattern_parts = []
+    for word in forbidden.keys():
+        pattern_parts.append(re.escape(word))  # Original word
+        pattern_parts.append(re.escape(word) + r's')  # Plural form
+    
+    return r'\b(' + '|'.join(pattern_parts) + r')\b'
 
 pattern = update_pattern()
 
 # Function to handle pluralization of replacements
 def pluralize_replacement(match, replacement):
-    # Check if the match ends with 's' and it's not part of the original word
-    if match.endswith('s') and match[:-1].lower() in forbidden:
-        # Simple English pluralization for the replacement
-        if replacement.endswith('y'):
-            return replacement[:-1] + 'ies'  # city -> cities
-        elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
-            return replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
-        else:
-            return replacement + 's'  # cat -> cats
-    return replacement
+    # Simple English pluralization for the replacement
+    # We've already determined this needs pluralization before calling
+    if replacement.endswith('y'):
+        return replacement[:-1] + 'ies'  # city -> cities
+    elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
+        return replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
+    else:
+        return replacement + 's'  # cat -> cats
 
 # Set up the bot with intents
 intents = discord.Intents.default()
@@ -127,24 +132,41 @@ async def on_message(message):
     if space_matches:
         # We need to replace the spaced version in the original content
         for match in space_matches:
-            # Get the base form (without trailing 's' if it exists)
-            base_match = match[:-1] if match.endswith('s') and match[:-1].lower() in forbidden else match
-            replacement = forbidden.get(base_match.lower(), base_match)
+            # Check if this is a plural form directly
+            is_plural = match.lower().endswith('s')
             
-            # Handle pluralization
-            if match.endswith('s') and match[:-1].lower() in forbidden:
+            # Get base form by removing 's' if it's a plural and its base exists in forbidden
+            base_match = match[:-1] if is_plural and match[:-1].lower() in forbidden else match
+            
+            # Get the appropriate replacement
+            if base_match.lower() in forbidden:
+                replacement = forbidden.get(base_match.lower())
+            elif match.lower() in forbidden:  # Direct match including plural forms
+                replacement = forbidden.get(match.lower())
+            else:
+                # Skip if we can't find a replacement
+                continue
+            
+            # Handle pluralization if needed
+            if is_plural and not match.lower() in forbidden:
                 replacement = pluralize_replacement(match, replacement)
+            
+            # Determine capitalization of the original match
+            if match.isupper():
+                replacement = replacement.upper()
+            elif match[0].isupper():
+                replacement = replacement[0].upper() + replacement[1:]
             
             # Find the spaced version in the original content - this is tricky
             # We'll use a regex that allows for spaces between characters
             spaced_pattern = ''.join([c + r'\s*' for c in base_match[:-1]]) + base_match[-1]
-            if match.endswith('s') and match[:-1].lower() in forbidden:
+            if is_plural:
                 spaced_pattern += r'\s*s'
             
-            # Replace in the original content
+            # Replace in the original content - make sure to use re.IGNORECASE
             match_content = re.sub(spaced_pattern, replacement, match_content, flags=re.IGNORECASE)
     
-    # Now process regular matches
+    # Now process regular matches - preserve case using a function
     def replace_word(m):
         match = m.group(0)
         # Get the base form (without trailing 's' if it exists)
@@ -153,7 +175,13 @@ async def on_message(message):
         
         # Handle pluralization
         if match.endswith('s') and match[:-1].lower() in forbidden:
-            return pluralize_replacement(match, replacement)
+            replacement = pluralize_replacement(match, replacement)
+            
+        # Preserve capitalization of the original word for better natural appearance
+        if match.isupper():
+            return replacement.upper()
+        elif match[0].isupper():
+            return replacement[0].upper() + replacement[1:]
         return replacement
     
     new_content = re.sub(pattern, replace_word, match_content, flags=re.IGNORECASE)
@@ -164,6 +192,9 @@ async def on_message(message):
         except discord.Forbidden:
             print(f"Cannot delete message in {message.channel.name}. Ensure bot has 'Manage Messages' permission.")
             return
+        except discord.NotFound:
+            print(f"Message {message.id} already deleted. Continuing with filter process.")
+            # Continue with the filter process even if the message is already deleted
         
         webhook = await get_webhook(message.channel)
         if webhook:
