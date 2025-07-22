@@ -27,37 +27,69 @@ def sanitize_filename(name):
     name = ''.join(c for c in name if c.isalnum() or c in (' ', '_', '-')).strip()
     return name[:50]  # Limit length to avoid filesystem issues
 
-# Function to get server config filename
+# Function to get server config filename (new naming convention)
 def get_config_filename(guild_id, guild_name=None):
     if guild_name:
         sanitized_name = sanitize_filename(guild_name)
-        return os.path.join(CONFIGS_DIR, f'config_{guild_id}_{sanitized_name}.json')
+        return os.path.join(CONFIGS_DIR, f'{sanitized_name}_{guild_id}.json')
     else:
         # Fallback to just ID if name isn't available
-        return os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
+        return os.path.join(CONFIGS_DIR, f'{guild_id}.json')
 
 # Function to find existing config file (handles migration from old naming)
 def find_existing_config(guild_id, guild_name=None):
-    """Find existing config file, checking both old and new naming conventions"""
-    # Try new naming convention first
+    """Find existing config file, checking old naming conventions and migrating if needed"""
+    # Try new naming convention first (server_name_id.json)
     if guild_name:
         new_filename = get_config_filename(guild_id, guild_name)
         if os.path.exists(new_filename):
             return new_filename
     
-    # Try old naming convention (just ID)
-    old_filename = os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
-    if os.path.exists(old_filename):
-        return old_filename
+    # Check for old naming conventions and migrate them
+    migration_candidates = []
     
-    # Try root directory (migration from very old version)
+    # Old naming convention 1: config_id_servername.json
+    if guild_name:
+        old_filename_1 = os.path.join(CONFIGS_DIR, f'config_{guild_id}_{sanitize_filename(guild_name)}.json')
+        if os.path.exists(old_filename_1):
+            migration_candidates.append(old_filename_1)
+    
+    # Old naming convention 2: config_id.json
+    old_filename_2 = os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
+    if os.path.exists(old_filename_2):
+        migration_candidates.append(old_filename_2)
+    
+    # Very old naming convention: config_id.json in root directory
     root_filename = f'config_{guild_id}.json'
     if os.path.exists(root_filename):
-        # Migrate to configs directory
+        migration_candidates.append(root_filename)
+    
+    # If we found old files, migrate the first one found
+    if migration_candidates:
+        old_file = migration_candidates[0]
         new_filename = get_config_filename(guild_id, guild_name)
-        os.rename(root_filename, new_filename)
-        print(f"Migrated config file from root to {new_filename}")
-        return new_filename
+        
+        try:
+            # If the new filename already exists (shouldn't happen but just in case)
+            if os.path.exists(new_filename):
+                print(f"Warning: {new_filename} already exists, skipping migration of {old_file}")
+                return new_filename
+            
+            os.rename(old_file, new_filename)
+            print(f"Migrated config file from {old_file} to {new_filename}")
+            
+            # Clean up any other old files for this guild to avoid confusion
+            for old_file_cleanup in migration_candidates[1:]:
+                try:
+                    os.remove(old_file_cleanup)
+                    print(f"Cleaned up old config file: {old_file_cleanup}")
+                except OSError:
+                    pass  # File might already be gone
+                    
+            return new_filename
+        except OSError as e:
+            print(f"Failed to migrate config file from {old_file} to {new_filename}: {e}")
+            return old_file  # Return the old file if migration fails
     
     return None
 
@@ -88,19 +120,22 @@ def load_server_config(guild_id, guild_name=None):
 
 # Function to save server-specific config
 def save_server_config(guild_id, config, guild_name=None):
-    # Check if there's an existing file to rename/update
-    existing_file = find_existing_config(guild_id, guild_name)
+    # Get the current filename (which might be an old one that needs updating)
+    current_file = find_existing_config(guild_id, guild_name)
     new_filename = get_config_filename(guild_id, guild_name)
     
-    # If existing file has different name, rename it
-    if existing_file and existing_file != new_filename:
+    # If the current file has a different name than the new standard, rename it
+    if current_file and current_file != new_filename:
         try:
-            os.rename(existing_file, new_filename)
-            print(f"Renamed config file from {existing_file} to {new_filename}")
+            # Only rename if the new filename doesn't already exist
+            if not os.path.exists(new_filename):
+                os.rename(current_file, new_filename)
+                print(f"Updated config filename from {current_file} to {new_filename}")
         except OSError:
-            # If rename fails, just use the new filename
+            # If rename fails, just use the new filename for saving
             pass
     
+    # Save the config using the new naming convention
     with open(new_filename, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
@@ -110,18 +145,56 @@ def get_pattern_for_server(forbidden):
         return None
     return r'\b(' + '|'.join(re.escape(word) + r's?' for word in forbidden.keys()) + r')\b'
 
-# Function to handle pluralization of replacements
-def pluralize_replacement(match, replacement):
-    # Check if the match ends with 's' and it's not part of the original word
-    if match.endswith('s') and match[:-1].lower() in forbidden:
-        # Simple English pluralization for the replacement
-        if replacement.endswith('y'):
-            return replacement[:-1] + 'ies'  # city -> cities
-        elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
-            return replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
+# Function to preserve capitalization from original to replacement
+def preserve_case(original, replacement):
+    """Preserve the capitalization pattern of the original word in the replacement"""
+    if not original or not replacement:
+        return replacement
+    
+    # If original is all uppercase
+    if original.isupper():
+        return replacement.upper()
+    
+    # If original is all lowercase
+    if original.islower():
+        return replacement.lower()
+    
+    # If original is title case (first letter uppercase)
+    if original[0].isupper() and (len(original) == 1 or original[1:].islower()):
+        return replacement.capitalize()
+    
+    # For mixed case, try to preserve as much pattern as possible
+    result = []
+    for i, char in enumerate(replacement):
+        if i < len(original):
+            if original[i].isupper():
+                result.append(char.upper())
+            else:
+                result.append(char.lower())
         else:
-            return replacement + 's'  # cat -> cats
-    return replacement
+            # For characters beyond original length, use lowercase
+            result.append(char.lower())
+    
+    return ''.join(result)
+
+# Function to handle pluralization of replacements with case preservation
+def pluralize_replacement(match, replacement, forbidden):
+    # Check if the match ends with 's' and it's not part of the original word
+    base_match = match[:-1] if match.endswith('s') or match.endswith('S') else match
+    if base_match.lower() in forbidden:
+        # Simple English pluralization for the replacement
+        plural_replacement = replacement
+        if replacement.endswith('y'):
+            plural_replacement = replacement[:-1] + 'ies'  # city -> cities
+        elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
+            plural_replacement = replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
+        else:
+            plural_replacement = replacement + 's'  # cat -> cats
+        
+        # Preserve case from the original match
+        return preserve_case(match, plural_replacement)
+    
+    return preserve_case(match, replacement)
 
 # Set up the bot with intents
 intents = discord.Intents.default()
@@ -169,47 +242,55 @@ async def on_message(message):
         return
     
     original_content = message.content
-    match_content = original_content
-    nospace_content = re.sub(r'\s+', '', original_content)  # Remove spaces for terms like "n i g g e r"
+    new_content = original_content
     
-    # First check if there are words with spaces between letters
+    # Handle spaced-out words first (e.g., "f a g" or "F A G")
+    nospace_content = re.sub(r'\s+', '', original_content)
     space_matches = re.findall(pattern, nospace_content, flags=re.IGNORECASE)
     
-    # If we found matches in the no-space version but not in the original,
-    # it means there are words with spaces between letters
     if space_matches:
-        # We need to replace the spaced version in the original content
         for match in space_matches:
             # Get the base form (without trailing 's' if it exists)
-            base_match = match[:-1] if match.endswith('s') and match[:-1].lower() in forbidden else match
+            base_match = match[:-1] if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden else match
             replacement = forbidden.get(base_match.lower(), base_match)
             
-            # Handle pluralization
-            if match.endswith('s') and match[:-1].lower() in forbidden:
-                replacement = pluralize_replacement(match, replacement)
+            # Handle pluralization with case preservation
+            if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
+                final_replacement = pluralize_replacement(match, replacement, forbidden)
+            else:
+                final_replacement = preserve_case(match, replacement)
             
-            # Find the spaced version in the original content - this is tricky
-            # We'll use a regex that allows for spaces between characters
-            spaced_pattern = ''.join([c + r'\s*' for c in base_match[:-1]]) + base_match[-1]
-            if match.endswith('s') and match[:-1].lower() in forbidden:
-                spaced_pattern += r'\s*s'
+            # Create a pattern to find the spaced version in the original content
+            # This creates a pattern like "f\s*a\s*g" for "fag"
+            spaced_pattern_chars = []
+            for i, char in enumerate(base_match):
+                if i > 0:
+                    spaced_pattern_chars.append(r'\s*')
+                spaced_pattern_chars.append(re.escape(char))
             
-            # Replace in the original content
-            match_content = re.sub(spaced_pattern, replacement, match_content, flags=re.IGNORECASE)
+            # Handle plural 's' if present
+            if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
+                spaced_pattern_chars.append(r'\s*[sS]')
+            
+            spaced_pattern = ''.join(spaced_pattern_chars)
+            
+            # Replace in the content with case-insensitive matching
+            new_content = re.sub(spaced_pattern, final_replacement, new_content, flags=re.IGNORECASE)
     
-    # Now process regular matches
+    # Now process regular matches with case preservation
     def replace_word(m):
         match = m.group(0)
         # Get the base form (without trailing 's' if it exists)
-        base_match = match[:-1] if match.endswith('s') and match[:-1].lower() in forbidden else match
+        base_match = match[:-1] if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden else match
         replacement = forbidden.get(base_match.lower(), base_match)
         
-        # Handle pluralization
-        if match.endswith('s') and match[:-1].lower() in forbidden:
-            return pluralize_replacement(match, replacement)
-        return replacement
+        # Handle pluralization with case preservation
+        if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
+            return pluralize_replacement(match, replacement, forbidden)
+        else:
+            return preserve_case(match, replacement)
     
-    new_content = re.sub(pattern, replace_word, match_content, flags=re.IGNORECASE)
+    new_content = re.sub(pattern, replace_word, new_content, flags=re.IGNORECASE)
     
     if new_content != original_content:
         try:
