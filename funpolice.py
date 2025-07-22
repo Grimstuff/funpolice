@@ -622,6 +622,58 @@ async def list_filters(interaction: discord.Interaction):
     view = PaginationView(user_id=interaction.user.id, pages=pages)
     await interaction.response.send_message(embed=pages[0], view=view, ephemeral=True)
 
+# Slash command to rename a filtered word
+@app_commands.command(
+    name="renamefilter",
+    description="Rename a replacement category and move all associated words (admin only)."
+)
+@is_admin()
+async def rename_filter(
+    interaction: discord.Interaction,
+    old_replacement: str,
+    new_replacement: str
+):
+    """Rename a replacement category and move all associated words to the new replacement."""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
+    old_replacement = old_replacement.strip()
+    new_replacement = new_replacement.strip()
+
+    if old_replacement not in config:
+        await interaction.response.send_message(f"Replacement category '{old_replacement}' not found in {interaction.guild.name}.", ephemeral=True)
+        return
+
+    # Get all words from the old category
+    old_words = config[old_replacement]
+    if isinstance(old_words, str):
+        old_words = [old_words]
+
+    # Merge with new category if it exists
+    if new_replacement in config:
+        if isinstance(config[new_replacement], list):
+            # Add only words not already present
+            merged_words = config[new_replacement] + [w for w in old_words if w not in config[new_replacement]]
+            config[new_replacement] = merged_words
+        else:
+            # Convert to list and merge
+            existing_word = config[new_replacement]
+            merged_words = [existing_word] + [w for w in old_words if w != existing_word]
+            config[new_replacement] = merged_words
+    else:
+        config[new_replacement] = old_words
+
+    # Remove the old category
+    del config[old_replacement]
+
+    save_server_config(interaction.guild.id, config, interaction.guild.name)
+    await interaction.response.send_message(
+        f"Renamed replacement category '{old_replacement}' to '{new_replacement}' and moved all associated words in {interaction.guild.name}.",
+        ephemeral=True
+    )    
+
 # Sync commands on bot startup
 @bot.event
 async def on_ready():
@@ -688,8 +740,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 bot.tree.add_command(add_filter)
 bot.tree.add_command(delete_filter)
 bot.tree.add_command(delete_replacement)
-bot.tree.add_command(reload_config)
+bot.tree.add_command(rename_filter)
 bot.tree.add_command(list_filters)
+bot.tree.add_command(reload_config)
 
 # Run the bot
 bot.run(BOT_TOKEN)
