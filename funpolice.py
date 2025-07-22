@@ -16,30 +16,33 @@ CONFIGS_DIR = 'configs'
 if not os.path.exists(CONFIGS_DIR):
     os.makedirs(CONFIGS_DIR)
 
+# Leetspeak character mappings for normalization
+LEETSPEAK_MAP = {
+    '4': 'a', '@': 'a', '3': 'e', '1': 'i', '!': 'i', '0': 'o', '5': 's', '$': 's', '7': 't', '+': 't',
+    '2': 'z', '6': 'g', '8': 'b', '9': 'g'
+}
+
 # Function to sanitize server name for filename
 def sanitize_filename(name):
     """Remove or replace characters that aren't valid in filenames"""
-    # Replace invalid characters with underscores
     invalid_chars = '<>:"/\\|?*'
     for char in invalid_chars:
         name = name.replace(char, '_')
-    # Remove any remaining problematic characters and limit length
     name = ''.join(c for c in name if c.isalnum() or c in (' ', '_', '-')).strip()
-    return name[:50]  # Limit length to avoid filesystem issues
+    return name[:50]
 
-# Function to get server config filename (new naming convention)
+# Function to get server config filename
 def get_config_filename(guild_id, guild_name=None):
     if guild_name:
         sanitized_name = sanitize_filename(guild_name)
         return os.path.join(CONFIGS_DIR, f'{sanitized_name}_{guild_id}.json')
     else:
-        # Fallback to just ID if name isn't available
         return os.path.join(CONFIGS_DIR, f'{guild_id}.json')
 
 # Function to find existing config file (handles migration from old naming)
 def find_existing_config(guild_id, guild_name=None):
     """Find existing config file, checking old naming conventions and migrating if needed"""
-    # Try new naming convention first (server_name_id.json)
+    # Try new naming convention first
     if guild_name:
         new_filename = get_config_filename(guild_id, guild_name)
         if os.path.exists(new_filename):
@@ -48,29 +51,25 @@ def find_existing_config(guild_id, guild_name=None):
     # Check for old naming conventions and migrate them
     migration_candidates = []
     
-    # Old naming convention 1: config_id_servername.json
     if guild_name:
         old_filename_1 = os.path.join(CONFIGS_DIR, f'config_{guild_id}_{sanitize_filename(guild_name)}.json')
         if os.path.exists(old_filename_1):
             migration_candidates.append(old_filename_1)
     
-    # Old naming convention 2: config_id.json
     old_filename_2 = os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
     if os.path.exists(old_filename_2):
         migration_candidates.append(old_filename_2)
     
-    # Very old naming convention: config_id.json in root directory
     root_filename = f'config_{guild_id}.json'
     if os.path.exists(root_filename):
         migration_candidates.append(root_filename)
     
-    # If we found old files, migrate the first one found
+    # Migrate the first old file found
     if migration_candidates:
         old_file = migration_candidates[0]
         new_filename = get_config_filename(guild_id, guild_name)
         
         try:
-            # If the new filename already exists (shouldn't happen but just in case)
             if os.path.exists(new_filename):
                 print(f"Warning: {new_filename} already exists, skipping migration of {old_file}")
                 return new_filename
@@ -78,18 +77,18 @@ def find_existing_config(guild_id, guild_name=None):
             os.rename(old_file, new_filename)
             print(f"Migrated config file from {old_file} to {new_filename}")
             
-            # Clean up any other old files for this guild to avoid confusion
+            # Clean up other old files
             for old_file_cleanup in migration_candidates[1:]:
                 try:
                     os.remove(old_file_cleanup)
                     print(f"Cleaned up old config file: {old_file_cleanup}")
                 except OSError:
-                    pass  # File might already be gone
+                    pass
                     
             return new_filename
         except OSError as e:
             print(f"Failed to migrate config file from {old_file} to {new_filename}: {e}")
-            return old_file  # Return the old file if migration fails
+            return old_file
     
     return None
 
@@ -97,7 +96,6 @@ def find_existing_config(guild_id, guild_name=None):
 def load_server_config(guild_id, guild_name=None):
     existing_file = find_existing_config(guild_id, guild_name)
     
-    # If config doesn't exist, return empty config
     if not existing_file:
         return {}, {}
     
@@ -120,30 +118,35 @@ def load_server_config(guild_id, guild_name=None):
 
 # Function to save server-specific config
 def save_server_config(guild_id, config, guild_name=None):
-    # Get the current filename (which might be an old one that needs updating)
     current_file = find_existing_config(guild_id, guild_name)
     new_filename = get_config_filename(guild_id, guild_name)
     
-    # If the current file has a different name than the new standard, rename it
     if current_file and current_file != new_filename:
         try:
-            # Only rename if the new filename doesn't already exist
             if not os.path.exists(new_filename):
                 os.rename(current_file, new_filename)
                 print(f"Updated config filename from {current_file} to {new_filename}")
         except OSError:
-            # If rename fails, just use the new filename for saving
             pass
     
-    # Save the config using the new naming convention
     with open(new_filename, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4, ensure_ascii=False)
 
-# Function to get regex pattern for a server
-def get_pattern_for_server(forbidden):
-    if not forbidden:
-        return None
-    return r'\b(' + '|'.join(re.escape(word) + r's?' for word in forbidden.keys()) + r')\b'
+# Function to normalize text for evasion detection
+def normalize_text(text):
+    """Normalize text by removing special characters and converting leetspeak"""
+    # Convert to lowercase
+    normalized = text.lower()
+    
+    # Replace leetspeak characters
+    for leet, normal in LEETSPEAK_MAP.items():
+        normalized = normalized.replace(leet, normal)
+    
+    # Remove common evasion characters but keep letters and numbers
+    # This removes spaces, dots, asterisks, dashes, underscores, etc.
+    normalized = re.sub(r'[^a-z0-9]', '', normalized)
+    
+    return normalized
 
 # Function to preserve capitalization from original to replacement
 def preserve_case(original, replacement):
@@ -151,19 +154,16 @@ def preserve_case(original, replacement):
     if not original or not replacement:
         return replacement
     
-    # If original is all uppercase
     if original.isupper():
         return replacement.upper()
     
-    # If original is all lowercase
     if original.islower():
         return replacement.lower()
     
-    # If original is title case (first letter uppercase)
     if original[0].isupper() and (len(original) == 1 or original[1:].islower()):
         return replacement.capitalize()
     
-    # For mixed case, try to preserve as much pattern as possible
+    # For mixed case, preserve pattern as much as possible
     result = []
     for i, char in enumerate(replacement):
         if i < len(original):
@@ -172,45 +172,176 @@ def preserve_case(original, replacement):
             else:
                 result.append(char.lower())
         else:
-            # For characters beyond original length, use lowercase
             result.append(char.lower())
     
     return ''.join(result)
 
-# Function to handle pluralization of replacements with case preservation
-def pluralize_replacement(match, replacement, forbidden):
-    # Check if the match ends with 's' and it's not part of the original word
-    base_match = match[:-1] if match.endswith('s') or match.endswith('S') else match
-    if base_match.lower() in forbidden:
-        # Simple English pluralization for the replacement
-        plural_replacement = replacement
-        if replacement.endswith('y'):
-            plural_replacement = replacement[:-1] + 'ies'  # city -> cities
-        elif replacement.endswith('sh') or replacement.endswith('ch') or replacement.endswith('x'):
-            plural_replacement = replacement + 'es'  # bush -> bushes, church -> churches, box -> boxes
-        else:
-            plural_replacement = replacement + 's'  # cat -> cats
-        
-        # Preserve case from the original match
-        return preserve_case(match, plural_replacement)
+# Function to handle pluralization
+def pluralize_replacement(match, replacement):
+    """Handle pluralization for replacements"""
+    plural_replacement = replacement
+    if replacement.endswith('y'):
+        plural_replacement = replacement[:-1] + 'ies'
+    elif replacement.endswith(('sh', 'ch', 'x')):
+        plural_replacement = replacement + 'es'
+    else:
+        plural_replacement = replacement + 's'
     
-    return preserve_case(match, replacement)
+    return preserve_case(match, plural_replacement)
 
-# Set up the bot with intents
-intents = discord.Intents.default()
-intents.message_content = True
-# Using a non-standard prefix to avoid conflicts with other bots
-# We'll only use slash commands, but need to set a prefix for the Bot class
-bot = commands.Bot(command_prefix='__funpolice__', intents=intents, help_command=None)
+# Function to detect filtered words with evasion techniques
+def detect_and_replace_words(content, forbidden):
+    """Detect and replace filtered words, handling various evasion techniques"""
+    if not forbidden:
+        return content
 
-# Adding an event handler to suppress command not found errors
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        # Silently ignore command not found errors
-        return
-    # For other errors, print them to console
-    print(f"Command error: {error}")
+    original_content = content
+    new_content = content
+    
+    # Create a list to track all matches and their positions
+    matches_to_replace = []
+    
+    # For each forbidden word, search for it in various forms
+    for forbidden_word, replacement in forbidden.items():
+        patterns = []
+        
+        # 1. Exact word boundaries (normal case)
+        patterns.append((rf'\b{re.escape(forbidden_word)}s?\b', forbidden_word, False))
+        
+        # 2. Simple wildcard replacement patterns
+        # This handles cases like f*g, n*gger, etc.
+        if len(forbidden_word) >= 3:
+            # Create patterns where one or more characters can be replaced by wildcards
+            wildcard_chars = r'[*.\-_#!?+=]'
+            
+            # Single wildcard replacement for each position (except first and last)
+            for i in range(1, len(forbidden_word) - 1):
+                pattern_parts = []
+                for j, char in enumerate(forbidden_word):
+                    if j == i:
+                        # This position can be original char OR wildcard
+                        pattern_parts.append(f'[{char.upper()}{char.lower()}*.\-_#!?+=]')
+                    else:
+                        pattern_parts.append(f'[{char.upper()}{char.lower()}]')
+                
+                pattern = r'\b' + ''.join(pattern_parts) + r's?\b'
+                patterns.append((pattern, forbidden_word, True))
+            
+            # Multiple consecutive wildcards in middle positions
+            if len(forbidden_word) >= 4:
+                pattern_parts = []
+                for j, char in enumerate(forbidden_word):
+                    if 1 <= j <= len(forbidden_word) - 2:  # Middle positions
+                        pattern_parts.append(f'[{char.upper()}{char.lower()}*.\-_#!?+=]')
+                    else:  # First and last must be correct letters
+                        pattern_parts.append(f'[{char.upper()}{char.lower()}]')
+                
+                pattern = r'\b' + ''.join(pattern_parts) + r's?\b'
+                patterns.append((pattern, forbidden_word, True))
+        
+        # 3. Spaced out version (e.g., "f a g")
+        if len(forbidden_word) >= 3:
+            spaced_parts = []
+            for i, char in enumerate(forbidden_word):
+                if i > 0:
+                    spaced_parts.append(r'\s*[^\w\s]*\s*')
+                spaced_parts.append(f'[{char.upper()}{char.lower()}]')
+            
+            spaced_pattern = r'\b' + ''.join(spaced_parts) + r'(?:\s*[^\w\s]*\s*[sS])?' + r'\b'
+            patterns.append((spaced_pattern, forbidden_word, True))
+        
+        # 4. Leetspeak patterns
+        if len(forbidden_word) >= 3:
+            leet_parts = []
+            for char in forbidden_word:
+                char_options = [char.upper(), char.lower()]
+                # Add leetspeak alternatives
+                for leet, normal in LEETSPEAK_MAP.items():
+                    if normal == char.lower():
+                        char_options.append(re.escape(leet))
+                
+                leet_parts.append(f'[{"".join(char_options)}]')
+            
+            leet_pattern = r'\b' + ''.join(leet_parts) + r's?\b'
+            patterns.append((leet_pattern, forbidden_word, True))
+        
+        # 5. Combined leetspeak + wildcard patterns
+        if len(forbidden_word) >= 3:
+            # Create patterns where each position can be: original letter, leetspeak, OR wildcard
+            for i in range(1, len(forbidden_word) - 1):  # Only middle positions can be wildcards
+                combined_parts = []
+                for j, char in enumerate(forbidden_word):
+                    char_options = [char.upper(), char.lower()]
+                    
+                    # Add leetspeak alternatives for all positions
+                    for leet, normal in LEETSPEAK_MAP.items():
+                        if normal == char.lower():
+                            char_options.append(re.escape(leet))
+                    
+                    # Add wildcard options for middle positions
+                    if j == i:
+                        char_options.extend(['*', '.', '-', '_', '#', '!', '?', '+', '='])
+                    
+                    combined_parts.append(f'[{"".join(re.escape(opt) for opt in char_options)}]')
+                
+                combined_pattern = r'\b' + ''.join(combined_parts) + r's?\b'
+                patterns.append((combined_pattern, forbidden_word, True))
+        
+        # Find all matches for this word
+        for pattern, base_word, is_evasion in patterns:
+            try:
+                for match in re.finditer(pattern, content, re.IGNORECASE):
+                    matched_text = match.group(0)
+                    
+                    # Simple validation for evasion attempts
+                    if is_evasion:
+                        # Remove word boundaries and check if it's reasonable
+                        clean_match = re.sub(r'[^\w]', '', matched_text.lower())
+                        clean_target = base_word.lower()
+                        
+                        # Must have at least 50% of the original letters
+                        matching_chars = sum(1 for c in clean_match if c in clean_target)
+                        if len(clean_match) > 0 and matching_chars / len(clean_target) < 0.5:
+                            continue
+                        
+                        # Shouldn't be too much longer than original
+                        if len(clean_match) > len(clean_target) + 2:
+                            continue
+                    
+                    # Determine if it's plural (simple check)
+                    is_plural = matched_text.lower().endswith('s') and len(matched_text) > len(base_word)
+                    
+                    if is_plural:
+                        final_replacement = pluralize_replacement(matched_text, replacement)
+                    else:
+                        final_replacement = preserve_case(matched_text, replacement)
+                    
+                    matches_to_replace.append((match.start(), match.end(), final_replacement))
+                    
+            except re.error as e:
+                print(f"Regex error with pattern '{pattern}': {e}")
+                continue
+    
+    # Sort matches by position (reverse order to maintain positions during replacement)
+    matches_to_replace.sort(key=lambda x: x[0], reverse=True)
+    
+    # Remove overlapping matches (keep the first match found)
+    filtered_matches = []
+    for start, end, repl in matches_to_replace:
+        overlaps = False
+        for existing_start, existing_end, _ in filtered_matches:
+            if not (end <= existing_start or start >= existing_end):
+                overlaps = True
+                break
+        
+        if not overlaps:
+            filtered_matches.append((start, end, repl))
+    
+    # Apply replacements
+    for start, end, replacement in filtered_matches:
+        new_content = new_content[:start] + replacement + new_content[end:]
+    
+    return new_content
 
 # Function to get or create a webhook
 async def get_webhook(channel):
@@ -223,6 +354,17 @@ async def get_webhook(channel):
     except discord.Forbidden:
         print(f"Cannot create webhook in {channel.name}. Ensure bot has 'Manage Webhooks' permission.")
         return None
+
+# Set up the bot with intents
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='__funpolice__', intents=intents, help_command=None)
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    print(f"Command error: {error}")
 
 # Event handler for new messages
 @bot.event
@@ -237,60 +379,8 @@ async def on_message(message):
     if not forbidden:
         return
     
-    pattern = get_pattern_for_server(forbidden)
-    if not pattern:
-        return
-    
     original_content = message.content
-    new_content = original_content
-    
-    # Handle spaced-out words first (e.g., "f a g" or "F A G")
-    nospace_content = re.sub(r'\s+', '', original_content)
-    space_matches = re.findall(pattern, nospace_content, flags=re.IGNORECASE)
-    
-    if space_matches:
-        for match in space_matches:
-            # Get the base form (without trailing 's' if it exists)
-            base_match = match[:-1] if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden else match
-            replacement = forbidden.get(base_match.lower(), base_match)
-            
-            # Handle pluralization with case preservation
-            if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
-                final_replacement = pluralize_replacement(match, replacement, forbidden)
-            else:
-                final_replacement = preserve_case(match, replacement)
-            
-            # Create a pattern to find the spaced version in the original content
-            # This creates a pattern like "f\s*a\s*g" for "fag"
-            spaced_pattern_chars = []
-            for i, char in enumerate(base_match):
-                if i > 0:
-                    spaced_pattern_chars.append(r'\s*')
-                spaced_pattern_chars.append(re.escape(char))
-            
-            # Handle plural 's' if present
-            if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
-                spaced_pattern_chars.append(r'\s*[sS]')
-            
-            spaced_pattern = ''.join(spaced_pattern_chars)
-            
-            # Replace in the content with case-insensitive matching
-            new_content = re.sub(spaced_pattern, final_replacement, new_content, flags=re.IGNORECASE)
-    
-    # Now process regular matches with case preservation
-    def replace_word(m):
-        match = m.group(0)
-        # Get the base form (without trailing 's' if it exists)
-        base_match = match[:-1] if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden else match
-        replacement = forbidden.get(base_match.lower(), base_match)
-        
-        # Handle pluralization with case preservation
-        if (match.endswith('s') or match.endswith('S')) and match[:-1].lower() in forbidden:
-            return pluralize_replacement(match, replacement, forbidden)
-        else:
-            return preserve_case(match, replacement)
-    
-    new_content = re.sub(pattern, replace_word, new_content, flags=re.IGNORECASE)
+    new_content = detect_and_replace_words(original_content, forbidden)
     
     if new_content != original_content:
         try:
@@ -301,57 +391,48 @@ async def on_message(message):
         
         webhook = await get_webhook(message.channel)
         if webhook:
-            # Determine the avatar URL: server-specific first, then global
-            avatar_url = message.author.guild_avatar.url if message.author.guild_avatar else message.author.avatar.url if message.author.avatar else None
+            # Determine the avatar URL
+            avatar_url = (message.author.guild_avatar.url if message.author.guild_avatar 
+                         else message.author.avatar.url if message.author.avatar else None)
             
-            # Check if the message is a reply
-            # Updated code using Discord's native quote formatting instead of embeds
+            # Handle replies
             if message.reference and message.reference.message_id:
                 try:
-                    # Try to fetch the message being replied to
                     replied_msg = await message.channel.fetch_message(message.reference.message_id)
                     
-                    # Format for replied content - truncate if too long
                     replied_content = replied_msg.content
-                    if not replied_content:  # Check if the message has no text content
+                    if not replied_content:
                         replied_content = "*[message had no text content]*"
                     
                     if len(replied_content) > 100:
                         replied_content = replied_content[:100] + "..."
                     
-                    # Create a quoted text format with cleaner mention handling
-                    # Format: > @Username: Message content  (if not a bot)
-                    # Format: > Username: Message content   (if a bot)
                     if not replied_msg.author.bot:
                         quoted_text = f"> {replied_msg.author.mention}: {replied_content}"
                     else:
                         quoted_text = f"> **{replied_msg.author.display_name}:** {replied_content}"
                     
-                    # Combine quote with the filtered message
-                    # Single line break without extra space
                     combined_content = f"{quoted_text}\n{new_content}"
                     
                     await webhook.send(
                         content=combined_content,
                         username=message.author.display_name,
                         avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])  # Ensure only the replied user gets pinged
+                        allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])
                     )
                 except discord.NotFound:
-                    # If we can't find the replied message, just send the filtered message
                     await webhook.send(
                         content=new_content,
                         username=message.author.display_name,
                         avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
                     )
             else:
-                # Not a reply, just send the filtered message
                 await webhook.send(
                     content=new_content,
                     username=message.author.display_name,
                     avatar_url=avatar_url,
-                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
+                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
                 )
 
 # Admin-only check for slash commands
@@ -362,7 +443,7 @@ def is_admin():
         return True
     return app_commands.check(predicate)
 
-# Server-specific autocomplete function for replacement parameter
+# Server-specific autocomplete function
 async def replacement_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     if not interaction.guild:
         return []
@@ -732,9 +813,9 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
     if isinstance(error, app_commands.CheckFailure):
         await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
     else:
-        # Log the error instead of raising it
         print(f"Error in slash command: {error}")
         await interaction.response.send_message("An error occurred while executing the command.", ephemeral=True)
+
 
 # Add commands to the bot's command tree
 bot.tree.add_command(add_filter)
