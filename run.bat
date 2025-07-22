@@ -1,5 +1,5 @@
 @echo off
-title Fun Police Discord Bot
+title Fun Police Discord Bot - Multi-Server Edition
 
 :: Change to the directory where the script is located
 cd /d %~dp0
@@ -10,7 +10,8 @@ SET VENV_PATH=%VENV_FOLDER%\Scripts\activate.bat
 SET BOT_SCRIPT=funpolice.py
 
 echo ===============================================
-echo     Fun Police Discord Bot - Auto Restarter    
+echo  Fun Police Discord Bot - Multi-Server Edition
+echo              Auto Restarter                   
 echo ===============================================
 
 :: Check if bot script exists
@@ -19,13 +20,6 @@ if not exist %BOT_SCRIPT% (
     echo Please make sure the bot script exists in this directory.
     pause
     exit /b 1
-)
-
-:: Check if config.json exists, if not, create an empty one
-if not exist config.json (
-    echo config.json not found. Creating an empty config.json...
-    echo { } > config.json
-    echo Empty config.json created successfully.
 )
 
 :: Check if secrets.json exists, if not, prompt for API key and create it
@@ -39,6 +33,25 @@ if not exist secrets.json (
     )
     echo { "BOT_TOKEN": "%BOT_TOKEN%" } > secrets.json
     echo secrets.json created successfully.
+)
+
+:: Remove old config.json if it exists (migration from single-server version)
+if exist config.json (
+    echo.
+    echo ================================================
+    echo  MIGRATION NOTICE
+    echo ================================================
+    echo Old single-server config.json detected!
+    echo The bot now uses server-specific config files.
+    echo.
+    echo Your old config.json will be renamed to config_backup.json
+    echo You'll need to re-add your filters using /addfilter commands
+    echo in each server where you want them to apply.
+    echo.
+    ren config.json config_backup.json
+    echo Old config backed up as config_backup.json
+    echo ================================================
+    echo.
 )
 
 :: Check if venv exists, if not, create it and install dependencies
@@ -82,6 +95,44 @@ if not exist %VENV_FOLDER% (
 
 echo Bot script: %BOT_SCRIPT%
 echo.
+
+:: Show setup instructions only if configs folder does not exist (first run)
+if not exist configs (
+    echo ================================================
+    echo  SETUP INSTRUCTIONS
+    echo ================================================
+    echo 1. Invite the bot to your Discord server(s) with these permissions:
+    echo.
+    echo    REQUIRED PERMISSIONS:
+    echo    - Send Messages ^(to send filtered replacement messages^)
+    echo    - Manage Messages ^(to delete original filtered messages^)
+    echo    - Manage Webhooks ^(to send messages as the original user^)
+    echo    - Use Slash Commands ^(for admin configuration commands^)
+    echo    - Read Message History ^(to fetch replied-to messages for context^)
+    echo    - View Channels ^(to see messages in channels where bot operates^)
+    echo.
+    echo    OPTIONAL BUT RECOMMENDED:
+    echo    - Add Reactions ^(future feature compatibility^)
+    echo    - Attach Files ^(for preserving attachments in filtered messages^)
+    echo.
+    echo    NOTE: The bot needs these permissions in every channel where
+    echo          you want word filtering to work.
+    echo.
+    echo 2. In each server, use /addfilter to create server-specific word filters
+    echo    Example: /addfilter replacement:kitten words:cat,feline
+    echo.
+    echo 3. Each server will have its own config file in the configs/ folder
+    echo    Format: config_SERVERID_ServerName.json
+    echo.
+    echo 4. Use /listfilters to see filters for the current server
+    echo    Use /deletefilter to remove individual words
+    echo    Use /deletereplacement to remove entire replacement categories
+    echo.
+    echo 5. All slash commands require Administrator permissions to use
+    echo ================================================
+    echo.
+    mkdir configs
+)
 
 :: Main loop that restarts the bot if it crashes
 :loop
