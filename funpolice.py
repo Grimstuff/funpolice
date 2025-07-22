@@ -301,6 +301,9 @@ async def on_message(message):
         
         webhook = await get_webhook(message.channel)
         if webhook:
+            # Determine the avatar URL: server-specific first, then global
+            avatar_url = message.author.guild_avatar.url if message.author.guild_avatar else message.author.avatar.url if message.author.avatar else None
+            
             # Check if the message is a reply
             # Updated code using Discord's native quote formatting instead of embeds
             if message.reference and message.reference.message_id:
@@ -331,7 +334,7 @@ async def on_message(message):
                     await webhook.send(
                         content=combined_content,
                         username=message.author.display_name,
-                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        avatar_url=avatar_url,
                         allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])  # Ensure only the replied user gets pinged
                     )
                 except discord.NotFound:
@@ -339,7 +342,7 @@ async def on_message(message):
                     await webhook.send(
                         content=new_content,
                         username=message.author.display_name,
-                        avatar_url=message.author.avatar.url if message.author.avatar else None,
+                        avatar_url=avatar_url,
                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
                     )
             else:
@@ -347,7 +350,7 @@ async def on_message(message):
                 await webhook.send(
                     content=new_content,
                     username=message.author.display_name,
-                    avatar_url=message.author.avatar.url if message.author.avatar else None,
+                    avatar_url=avatar_url,
                     allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)  # Default safe mention settings
                 )
 
