@@ -6,6 +6,7 @@ import json
 import os
 import time
 import asyncio
+import io
 from discord.ui import Button, View
 
 # Load secrets
@@ -453,17 +454,61 @@ async def handle_reply(message, new_content):
         log_error(e, f"Error handling reply to message {message.reference.message_id}")
         return (new_content, None)
 
-async def send_filtered_message(message, webhook, new_content):
+async def send_filtered_message_with_attachments(message, webhook, new_content, downloaded_attachments, skipped_attachments=None):
     try:
         avatar_url = (message.author.guild_avatar.url if message.author.guild_avatar 
                     else message.author.avatar.url if message.author.avatar else None)
         
-        content, reply_user = await handle_reply(message, new_content)
+        content = new_content
+        
+        # Add simple notice about skipped attachments
+        if skipped_attachments:
+            too_large_count = sum(1 for s in skipped_attachments if s['reason'] == 'too_large')
+            failed_count = len(skipped_attachments) - too_large_count
+            
+            notices = []
+            if too_large_count > 0:
+                notices.append("*Attached file too large to repost (8MB limit)*")
+            if failed_count > 0:
+                notices.append("*Some attachments failed to process*")
+            
+            if notices:
+                content += "\n\n" + "\n".join(notices)
+        
+        # Handle reply processing
+        reply_user = None
+        if message.reference and message.reference.message_id:
+            try:
+                replied_msg = await message.channel.fetch_message(message.reference.message_id)
+                if replied_msg:
+                    replied_content = replied_msg.content or "*[message had no text content]*"
+                    replied_content = replied_content[:100] + "..." if len(replied_content) > 100 else replied_content
+                    
+                    prefix = f"> {replied_msg.author.mention}" if not replied_msg.author.bot else f"> **{replied_msg.author.display_name}**"
+                    content = f"{prefix}: {replied_content}\n{content}"
+                    reply_user = replied_msg.author
+            except Exception as e:
+                log_error(e, f"Error handling reply to message {message.reference.message_id}")
+        
+        # Convert downloaded attachments to discord.File objects
+        files = []
+        for attachment_data in downloaded_attachments:
+            try:
+                discord_file = discord.File(
+                    io.BytesIO(attachment_data['data']), 
+                    filename=attachment_data['filename'],
+                    spoiler=attachment_data['spoiler']
+                )
+                files.append(discord_file)
+            except Exception as e:
+                log_error(e, f"Failed to create discord.File for {attachment_data['filename']}")
+                continue
         
         await webhook.send(
             content=content,
             username=message.author.display_name,
             avatar_url=avatar_url,
+            files=files,
             allowed_mentions=discord.AllowedMentions(
                 users=[reply_user] if reply_user else [],
                 everyone=False,
@@ -472,13 +517,16 @@ async def send_filtered_message(message, webhook, new_content):
         )
     except Exception as e:
         log_error(e, f"Error sending filtered message in {message.channel.name}")
-        # Fallback to basic message if reply handling fails
-        await webhook.send(
-            content=new_content,
-            username=message.author.display_name,
-            avatar_url=avatar_url,
-            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
-        )
+        # Fallback to basic message without attachments if everything fails
+        try:
+            await webhook.send(
+                content=new_content,
+                username=message.author.display_name,
+                avatar_url=avatar_url,
+                allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
+            )
+        except Exception as fallback_error:
+            log_error(fallback_error, f"Fallback message also failed in {message.channel.name}")
 
 # Event handler for new messages
 @bot.event
@@ -494,16 +542,52 @@ async def on_message(message):
     new_content = detect_and_replace_words(message.content, forbidden)
     if new_content == message.content:
         return
-        
+    
+    # Download attachments BEFORE deleting the message
+    downloaded_attachments = []
+    skipped_attachments = []
+    MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB in bytes
+    
+    if message.attachments:
+        for attachment in message.attachments:
+            try:
+                # Check file size before downloading
+                if attachment.size > MAX_FILE_SIZE:
+                    print(f"Skipping {attachment.filename} - too large ({attachment.size / (1024*1024):.1f}MB)")
+                    skipped_attachments.append({
+                        'filename': attachment.filename,
+                        'size': attachment.size,
+                        'reason': 'too_large'
+                    })
+                    continue
+                
+                # Download the attachment data
+                file_data = await attachment.read()
+                downloaded_attachments.append({
+                    'data': file_data,
+                    'filename': attachment.filename,
+                    'spoiler': attachment.is_spoiler()
+                })
+            except Exception as e:
+                log_error(e, f"Failed to download attachment {attachment.filename}")
+                skipped_attachments.append({
+                    'filename': attachment.filename,
+                    'size': attachment.size,
+                    'reason': 'download_failed'
+                })
+                continue
+    
+    # Now delete the original message
     try:
         await message.delete()
     except discord.Forbidden:
         print(f"Cannot delete message in {message.channel.name}. Ensure bot has 'Manage Messages' permission.")
         return
     
+    # Get webhook and send the filtered message with attachments
     webhook = await config_cache.get_webhook(message.channel)
     if webhook:
-        await send_filtered_message(message, webhook, new_content)
+        await send_filtered_message_with_attachments(message, webhook, new_content, downloaded_attachments, skipped_attachments)
 
 # Admin-only check for slash commands
 def is_admin():
