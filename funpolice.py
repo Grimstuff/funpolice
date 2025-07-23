@@ -4,6 +4,8 @@ from discord.ext import commands
 import re
 import json
 import os
+import time
+import asyncio
 from discord.ui import Button, View
 
 # Load secrets
@@ -21,6 +23,135 @@ LEETSPEAK_MAP = {
     '4': 'a', '@': 'a', '3': 'e', '1': 'i', '!': 'i', '0': 'o', '5': 's', '$': 's', '7': 't', '+': 't',
     '2': 'z', '6': 'g', '8': 'b', '9': 'g'
 }
+
+# Pre-compiled regex patterns
+WORD_BOUNDARY_PATTERN = re.compile(r'\b')
+NON_WORD_CHAR_PATTERN = re.compile(r'[^\w]')
+SPACE_OR_SPECIAL = re.compile(r'\s*[^\w\s]*\s*')
+
+# Configuration cache class
+class ConfigCache:
+    def __init__(self):
+        self.configs = {}
+        self.webhooks = {}
+        self.cache_timeout = 300  # 5 minutes
+        self.webhook_timeout = 3600  # 1 hour
+        
+    def get(self, guild_id: int, guild_name: str):
+        cache_key = f"{guild_id}"
+        cached = self.configs.get(cache_key)
+        if cached and (time.time() - cached['timestamp']) < self.cache_timeout:
+            return cached['config'], cached['forbidden']
+            
+        config, forbidden = load_server_config(guild_id, guild_name)
+        self.configs[cache_key] = {
+            'config': config,
+            'forbidden': forbidden,
+            'timestamp': time.time()
+        }
+        return config, forbidden
+        
+    def invalidate(self, guild_id: int):
+        cache_key = f"{guild_id}"
+        self.configs.pop(cache_key, None)
+    
+    async def get_webhook(self, channel):
+        cache_key = f"{channel.guild.id}_{channel.id}"
+        current_time = time.time()
+        
+        if (cache_key in self.webhooks and 
+            current_time - self.webhooks[cache_key]['timestamp'] < self.webhook_timeout):
+            return self.webhooks[cache_key]['webhook']
+        
+        webhook = await self._create_or_find_webhook(channel)
+        if webhook:
+            self.webhooks[cache_key] = {
+                'webhook': webhook,
+                'timestamp': current_time
+            }
+        return webhook
+    
+    async def _create_or_find_webhook(self, channel):
+        try:
+            webhooks = await channel.webhooks()
+            for wh in webhooks:
+                if wh.name == "WordFilterWebhook":
+                    return wh
+            return await channel.create_webhook(name="WordFilterWebhook")
+        except discord.Forbidden:
+            print(f"Cannot create webhook in {channel.name}. Ensure bot has 'Manage Webhooks' permission.")
+            return None
+    
+    def cleanup_expired_cache(self):
+        current_time = time.time()
+        # Clean configs
+        expired_configs = [
+            k for k, v in self.configs.items() 
+            if current_time - v['timestamp'] > self.cache_timeout
+        ]
+        for key in expired_configs:
+            self.configs.pop(key, None)
+            
+        # Clean webhooks
+        expired_webhooks = [
+            k for k, v in self.webhooks.items() 
+            if current_time - v['timestamp'] > self.webhook_timeout
+        ]
+        for key in expired_webhooks:
+            self.webhooks.pop(key, None)
+
+# WordFilter class for optimized regex patterns
+class WordFilter:
+    def __init__(self):
+        self.patterns = {}
+        self.pattern_timeout = 3600  # 1 hour pattern cache
+        self.last_update = {}
+    
+    def get_pattern(self, word: str, replacement: str) -> list:
+        cache_key = word
+        current_time = time.time()
+        
+        # Check if pattern is cached and not expired
+        if (cache_key in self.patterns and 
+            current_time - self.last_update.get(cache_key, 0) < self.pattern_timeout):
+            return self.patterns[cache_key]
+            
+        patterns = []
+        
+        # Basic word boundary pattern
+        patterns.append((rf'\b{re.escape(word)}s?\b', word, False))
+        
+        if len(word) >= 3:
+            # Combined leetspeak/wildcard pattern
+            leet_parts = []
+            for i, char in enumerate(word):
+                char_options = [char.upper(), char.lower()]
+                # Add leetspeak alternatives
+                for leet, normal in LEETSPEAK_MAP.items():
+                    if normal == char.lower():
+                        char_options.append(re.escape(leet))
+                
+                # Allow wildcards in middle positions
+                if 0 < i < len(word) - 1:
+                    char_options.extend(['*', '.', '-', '_', '#', '!', '?', '+', '='])
+                
+                leet_parts.append(f'[{"".join(re.escape(opt) for opt in char_options)}]')
+            
+            patterns.append((r'\b' + ''.join(leet_parts) + r's?\b', word, True))
+            
+            # Spaced pattern
+            spaced_parts = []
+            for i, char in enumerate(word):
+                if i > 0:
+                    spaced_parts.append(r'\s*[^\w\s]*\s*')
+                spaced_parts.append(f'[{char.upper()}{char.lower()}]')
+            
+            patterns.append((r'\b' + ''.join(spaced_parts) + r'(?:\s*[^\w\s]*\s*[sS])?' + r'\b', word, True))
+        
+        # Cache the patterns
+        self.patterns[cache_key] = patterns
+        self.last_update[cache_key] = current_time
+        return patterns
 
 # Function to sanitize server name for filename
 def sanitize_filename(name):
@@ -118,19 +249,27 @@ def load_server_config(guild_id, guild_name=None):
 
 # Function to save server-specific config
 def save_server_config(guild_id, config, guild_name=None):
-    current_file = find_existing_config(guild_id, guild_name)
     new_filename = get_config_filename(guild_id, guild_name)
+    temp_filename = f"{new_filename}.tmp"
     
-    if current_file and current_file != new_filename:
-        try:
-            if not os.path.exists(new_filename):
-                os.rename(current_file, new_filename)
-                print(f"Updated config filename from {current_file} to {new_filename}")
-        except OSError:
-            pass
-    
-    with open(new_filename, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
+    # Write to temporary file first
+    try:
+        with open(temp_filename, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        
+        # Atomic rename
+        os.replace(temp_filename, new_filename)
+    except Exception as e:
+        # Clean up temp file if it exists
+        if os.path.exists(temp_filename):
+            try:
+                os.remove(temp_filename)
+            except OSError:
+                pass
+        raise e
+    finally:
+        # Invalidate the cache for this guild
+        config_cache.invalidate(guild_id)
 
 # Function to normalize text for evasion detection
 def normalize_text(text):
@@ -195,99 +334,15 @@ def detect_and_replace_words(content, forbidden):
     if not forbidden:
         return content
 
-    original_content = content
     new_content = content
-    
-    # Create a list to track all matches and their positions
     matches_to_replace = []
     
-    # For each forbidden word, search for it in various forms
+    # For each forbidden word, use cached patterns
     for forbidden_word, replacement in forbidden.items():
-        patterns = []
+        # Get cached patterns for this word
+        patterns = word_filter.get_pattern(forbidden_word, replacement)
         
-        # 1. Exact word boundaries (normal case)
-        patterns.append((rf'\b{re.escape(forbidden_word)}s?\b', forbidden_word, False))
-        
-        # 2. Simple wildcard replacement patterns
-        # This handles cases like f*g, n*gger, etc.
-        if len(forbidden_word) >= 3:
-            # Create patterns where one or more characters can be replaced by wildcards
-            wildcard_chars = r'[*.\-_#!?+=]'
-            
-            # Single wildcard replacement for each position (except first and last)
-            for i in range(1, len(forbidden_word) - 1):
-                pattern_parts = []
-                for j, char in enumerate(forbidden_word):
-                    if j == i:
-                        # This position can be original char OR wildcard
-                        pattern_parts.append(f'[{char.upper()}{char.lower()}*.\-_#!?+=]')
-                    else:
-                        pattern_parts.append(f'[{char.upper()}{char.lower()}]')
-                
-                pattern = r'\b' + ''.join(pattern_parts) + r's?\b'
-                patterns.append((pattern, forbidden_word, True))
-            
-            # Multiple consecutive wildcards in middle positions
-            if len(forbidden_word) >= 4:
-                pattern_parts = []
-                for j, char in enumerate(forbidden_word):
-                    if 1 <= j <= len(forbidden_word) - 2:  # Middle positions
-                        pattern_parts.append(f'[{char.upper()}{char.lower()}*.\-_#!?+=]')
-                    else:  # First and last must be correct letters
-                        pattern_parts.append(f'[{char.upper()}{char.lower()}]')
-                
-                pattern = r'\b' + ''.join(pattern_parts) + r's?\b'
-                patterns.append((pattern, forbidden_word, True))
-        
-        # 3. Spaced out version (e.g., "f a g")
-        if len(forbidden_word) >= 3:
-            spaced_parts = []
-            for i, char in enumerate(forbidden_word):
-                if i > 0:
-                    spaced_parts.append(r'\s*[^\w\s]*\s*')
-                spaced_parts.append(f'[{char.upper()}{char.lower()}]')
-            
-            spaced_pattern = r'\b' + ''.join(spaced_parts) + r'(?:\s*[^\w\s]*\s*[sS])?' + r'\b'
-            patterns.append((spaced_pattern, forbidden_word, True))
-        
-        # 4. Leetspeak patterns
-        if len(forbidden_word) >= 3:
-            leet_parts = []
-            for char in forbidden_word:
-                char_options = [char.upper(), char.lower()]
-                # Add leetspeak alternatives
-                for leet, normal in LEETSPEAK_MAP.items():
-                    if normal == char.lower():
-                        char_options.append(re.escape(leet))
-                
-                leet_parts.append(f'[{"".join(char_options)}]')
-            
-            leet_pattern = r'\b' + ''.join(leet_parts) + r's?\b'
-            patterns.append((leet_pattern, forbidden_word, True))
-        
-        # 5. Combined leetspeak + wildcard patterns
-        if len(forbidden_word) >= 3:
-            # Create patterns where each position can be: original letter, leetspeak, OR wildcard
-            for i in range(1, len(forbidden_word) - 1):  # Only middle positions can be wildcards
-                combined_parts = []
-                for j, char in enumerate(forbidden_word):
-                    char_options = [char.upper(), char.lower()]
-                    
-                    # Add leetspeak alternatives for all positions
-                    for leet, normal in LEETSPEAK_MAP.items():
-                        if normal == char.lower():
-                            char_options.append(re.escape(leet))
-                    
-                    # Add wildcard options for middle positions
-                    if j == i:
-                        char_options.extend(['*', '.', '-', '_', '#', '!', '?', '+', '='])
-                    
-                    combined_parts.append(f'[{"".join(re.escape(opt) for opt in char_options)}]')
-                
-                combined_pattern = r'\b' + ''.join(combined_parts) + r's?\b'
-                patterns.append((combined_pattern, forbidden_word, True))
-        
-        # Find all matches for this word
+        # Find all matches using the optimized patterns
         for pattern, base_word, is_evasion in patterns:
             try:
                 for match in re.finditer(pattern, content, re.IGNORECASE):
@@ -355,10 +410,14 @@ async def get_webhook(channel):
         print(f"Cannot create webhook in {channel.name}. Ensure bot has 'Manage Webhooks' permission.")
         return None
 
-# Set up the bot with intents
+# Set up the bot with intents and caches
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='__funpolice__', intents=intents, help_command=None)
+
+# Initialize caches
+config_cache = ConfigCache()
+word_filter = WordFilter()
 
 @bot.event
 async def on_command_error(ctx, error):
@@ -366,74 +425,85 @@ async def on_command_error(ctx, error):
         return
     print(f"Command error: {error}")
 
+# Message processing functions
+def should_process_message(message):
+    return not message.author.bot and message.guild is not None
+
+async def handle_reply(message, new_content):
+    if not message.reference or not message.reference.message_id:
+        return (new_content, None)
+        
+    try:
+        replied_msg = await message.channel.fetch_message(message.reference.message_id)
+        if not replied_msg:
+            return (new_content, None)
+
+        replied_content = replied_msg.content or "*[message had no text content]*"
+        replied_content = replied_content[:100] + "..." if len(replied_content) > 100 else replied_content
+        
+        prefix = f"> {replied_msg.author.mention}" if not replied_msg.author.bot else f"> **{replied_msg.author.display_name}**"
+        return (f"{prefix}: {replied_content}\n{new_content}", replied_msg.author)
+    except discord.NotFound:
+        log_error(None, f"Referenced message {message.reference.message_id} not found")
+        return (new_content, None)
+    except discord.Forbidden:
+        log_error(None, f"No permission to fetch message {message.reference.message_id}")
+        return (new_content, None)
+    except Exception as e:
+        log_error(e, f"Error handling reply to message {message.reference.message_id}")
+        return (new_content, None)
+
+async def send_filtered_message(message, webhook, new_content):
+    try:
+        avatar_url = (message.author.guild_avatar.url if message.author.guild_avatar 
+                    else message.author.avatar.url if message.author.avatar else None)
+        
+        content, reply_user = await handle_reply(message, new_content)
+        
+        await webhook.send(
+            content=content,
+            username=message.author.display_name,
+            avatar_url=avatar_url,
+            allowed_mentions=discord.AllowedMentions(
+                users=[reply_user] if reply_user else [],
+                everyone=False,
+                roles=False
+            )
+        )
+    except Exception as e:
+        log_error(e, f"Error sending filtered message in {message.channel.name}")
+        # Fallback to basic message if reply handling fails
+        await webhook.send(
+            content=new_content,
+            username=message.author.display_name,
+            avatar_url=avatar_url,
+            allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
+        )
+
 # Event handler for new messages
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    if not should_process_message(message):
         return
     
-    # Load server-specific config
-    config, forbidden = load_server_config(message.guild.id, message.guild.name)
-    
-    # If no config exists for this server, do nothing
+    # Load server-specific config from cache
+    config, forbidden = config_cache.get(message.guild.id, message.guild.name)
     if not forbidden:
         return
     
-    original_content = message.content
-    new_content = detect_and_replace_words(original_content, forbidden)
-    
-    if new_content != original_content:
-        try:
-            await message.delete()
-        except discord.Forbidden:
-            print(f"Cannot delete message in {message.channel.name}. Ensure bot has 'Manage Messages' permission.")
-            return
+    new_content = detect_and_replace_words(message.content, forbidden)
+    if new_content == message.content:
+        return
         
-        webhook = await get_webhook(message.channel)
-        if webhook:
-            # Determine the avatar URL
-            avatar_url = (message.author.guild_avatar.url if message.author.guild_avatar 
-                         else message.author.avatar.url if message.author.avatar else None)
-            
-            # Handle replies
-            if message.reference and message.reference.message_id:
-                try:
-                    replied_msg = await message.channel.fetch_message(message.reference.message_id)
-                    
-                    replied_content = replied_msg.content
-                    if not replied_content:
-                        replied_content = "*[message had no text content]*"
-                    
-                    if len(replied_content) > 100:
-                        replied_content = replied_content[:100] + "..."
-                    
-                    if not replied_msg.author.bot:
-                        quoted_text = f"> {replied_msg.author.mention}: {replied_content}"
-                    else:
-                        quoted_text = f"> **{replied_msg.author.display_name}:** {replied_content}"
-                    
-                    combined_content = f"{quoted_text}\n{new_content}"
-                    
-                    await webhook.send(
-                        content=combined_content,
-                        username=message.author.display_name,
-                        avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(users=[replied_msg.author])
-                    )
-                except discord.NotFound:
-                    await webhook.send(
-                        content=new_content,
-                        username=message.author.display_name,
-                        avatar_url=avatar_url,
-                        allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
-                    )
-            else:
-                await webhook.send(
-                    content=new_content,
-                    username=message.author.display_name,
-                    avatar_url=avatar_url,
-                    allowed_mentions=discord.AllowedMentions(everyone=False, roles=False)
-                )
+    try:
+        await message.delete()
+    except discord.Forbidden:
+        print(f"Cannot delete message in {message.channel.name}. Ensure bot has 'Manage Messages' permission.")
+        return
+    
+    webhook = await config_cache.get_webhook(message.channel)
+    if webhook:
+        await send_filtered_message(message, webhook, new_content)
 
 # Admin-only check for slash commands
 def is_admin():
@@ -755,7 +825,15 @@ async def rename_filter(
         ephemeral=True
     )    
 
-# Sync commands on bot startup
+# Setup hook for initialization
+async def setup_hook():
+    # Start cache cleanup task
+    bot.loop.create_task(cleanup_cache_task())
+
+# Add setup hook to bot
+bot.setup_hook = setup_hook
+
+# Sync commands on startup
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -825,5 +903,36 @@ bot.tree.add_command(rename_filter)
 bot.tree.add_command(list_filters)
 bot.tree.add_command(reload_config)
 
-# Run the bot
-bot.run(BOT_TOKEN)
+# Error handling system
+class BotError(Exception):
+    """Base error class for bot-specific errors"""
+    pass
+
+class ConfigError(BotError):
+    """Configuration related errors"""
+    pass
+
+class WebhookError(BotError):
+    """Webhook related errors"""
+    pass
+
+def log_error(error, context=None):
+    """Centralized error logging"""
+    error_msg = f"{type(error).__name__}: {str(error)}"
+    if context:
+        error_msg = f"{context}: {error_msg}"
+    print(error_msg)  # Could be replaced with proper logging
+
+# Periodic cache cleanup
+async def cleanup_cache_task():
+    while True:
+        await asyncio.sleep(300)  # Run every 5 minutes
+        config_cache.cleanup_expired_cache()
+
+# Run the bot with proper error handling
+try:
+    bot.run(BOT_TOKEN)
+except KeyboardInterrupt:
+    print("\nBot shutdown by user")
+except Exception as e:
+    log_error(e, "Fatal error")
