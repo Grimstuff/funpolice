@@ -14,6 +14,17 @@ with open('secrets.json', 'r') as f:
     secrets = json.load(f)
     BOT_TOKEN = secrets['BOT_TOKEN']
 
+# Error logging function
+def log_error(error: Exception, context: str = None):
+    """Log errors to console with context"""
+    error_msg = f"Error: {error}" if error else "Unknown error"
+    if context:
+        error_msg = f"{context} - {error_msg}"
+    print(error_msg)
+    # Could be extended to write to a file if needed:
+    # with open('error.log', 'a') as f:
+    #     f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {error_msg}\n")
+
 # Ensure configs directory exists
 CONFIGS_DIR = 'configs'
 if not os.path.exists(CONFIGS_DIR):
@@ -962,6 +973,15 @@ async def rename_filter(
         f"Renamed replacement category '{old_replacement}' to '{new_replacement}' and moved all associated words in {interaction.guild.name}.",
         ephemeral=True
     )    
+
+# Periodic cache cleanup task
+async def cleanup_cache_task():
+    while True:
+        await asyncio.sleep(300)  # Run every 5 minutes
+        try:
+            config_cache.cleanup_expired_cache()
+        except Exception as e:
+            print(f"Error during cache cleanup: {e}")
 
 # Setup hook for initialization
 async def setup_hook():
