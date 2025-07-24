@@ -663,7 +663,7 @@ async def replacement_autocomplete(interaction: discord.Interaction, current: st
     
     config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
-    if "replacements" not in config:
+    if not config or "replacements" not in config:
         return []
         
     replacements = list(config["replacements"].keys())
@@ -851,14 +851,12 @@ async def delete_replacement(
     
     replacement = replacement.strip()
     
-    if replacement not in config:
+    # Check if the replacement exists in the config
+    if "replacements" not in config or replacement not in config["replacements"]:
         await interaction.response.send_message(f"Replacement category '{replacement}' not found in {interaction.guild.name}.", ephemeral=True)
         return
     
     # Get the words for confirmation message
-    if "replacements" not in config or replacement not in config["replacements"]:
-        await interaction.response.send_message(f"Replacement category '{replacement}' not found in {interaction.guild.name}.", ephemeral=True)
-        return
 
     data = config["replacements"][replacement]
     words = data.get("words", [])
