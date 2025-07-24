@@ -802,17 +802,23 @@ async def delete_filter(
     found = False
     
     # Search for the word in config
-    for replacement, words in list(config.items()):
-        if isinstance(words, list) and word in words:
-            config[replacement].remove(word)
-            if not config[replacement]:  # Remove empty lists
-                del config[replacement]
-            found = True
-            break
-        elif isinstance(words, str) and words.lower() == word:
-            del config[replacement]
-            found = True
-            break
+    if "replacements" in config:
+        for replacement, data in list(config["replacements"].items()):
+            words = data.get("words", [])
+            if isinstance(words, str):
+                words = [words]
+            if word in words:
+                # If it's a single word, remove the whole category
+                if isinstance(data["words"], str) or len(data["words"]) == 1:
+                    del config["replacements"][replacement]
+                else:
+                    # Remove the word from the list
+                    data["words"].remove(word)
+                    # Remove category if no words left
+                    if not data["words"]:
+                        del config["replacements"][replacement]
+                found = True
+                break
     
     if not found:
         await interaction.response.send_message(f"Word '{word}' not found in the filter for {interaction.guild.name}.", ephemeral=True)
@@ -850,9 +856,16 @@ async def delete_replacement(
         return
     
     # Get the words for confirmation message
-    words = config[replacement]
-    word_count = 1 if isinstance(words, str) else len(words)
-    words_str = words if isinstance(words, str) else ", ".join(words)
+    if "replacements" not in config or replacement not in config["replacements"]:
+        await interaction.response.send_message(f"Replacement category '{replacement}' not found in {interaction.guild.name}.", ephemeral=True)
+        return
+
+    data = config["replacements"][replacement]
+    words = data.get("words", [])
+    if isinstance(words, str):
+        words = [words]
+    word_count = len(words)
+    words_str = ", ".join(words)
     
     # Create a warning message with confirmation button
     warning_message = (
@@ -906,17 +919,43 @@ async def list_filters(interaction: discord.Interaction):
     
     # Create pages (5 categories per page)
     items_per_page = 5
-    replacements = list(config.items())
+    replacements = list(config.get("replacements", {}).items())
     pages = []
     
     for i in range(0, len(replacements), items_per_page):
         embed = discord.Embed(title=f"Word Filters - {interaction.guild.name}", color=0x00ff00)
         embed.set_footer(text=f"Page {i // items_per_page + 1} of {(len(replacements) - 1) // items_per_page + 1}")
-        for replacement, words in replacements[i:i + items_per_page]:
-            # Convert words to string if it's a single string
-            words_str = ", ".join(words) if isinstance(words, list) else words
-            embed.add_field(name=replacement, value=words_str, inline=False)
+        
+        for replacement, data in replacements[i:i + items_per_page]:
+            # Get words list and format it nicely
+            words = data.get("words", [])
+            if isinstance(words, str):
+                words = [words]
+            words_str = ", ".join(f"`{word}`" for word in words)
+            
+            # Get whitelist if any
+            whitelist = data.get("whitelist", [])
+            if whitelist:
+                whitelist_str = "\nWhitelist: " + ", ".join(f"`{w}`" for w in whitelist)
+            else:
+                whitelist_str = ""
+            
+            # Add field to embed with proper formatting
+            value = f"{words_str}{whitelist_str}"
+            if len(value) > 1024:  # Discord embed field value limit
+                value = value[:1021] + "..."
+                
+            embed.add_field(name=f"➜ {replacement}", value=value, inline=False)
+            
         pages.append(embed)
+
+    if not pages:  # Create empty state page
+        embed = discord.Embed(
+            title=f"Word Filters - {interaction.guild.name}",
+            description="No filters configured.",
+            color=0x00ff00
+        )
+        pages = [embed]
     
     # Send the first page with navigation buttons
     view = PaginationView(user_id=interaction.user.id, pages=pages)
@@ -942,31 +981,45 @@ async def rename_filter(
     old_replacement = old_replacement.strip()
     new_replacement = new_replacement.strip()
 
-    if old_replacement not in config:
+    if "replacements" not in config or old_replacement not in config["replacements"]:
         await interaction.response.send_message(f"Replacement category '{old_replacement}' not found in {interaction.guild.name}.", ephemeral=True)
         return
-
+    
     # Get all words from the old category
-    old_words = config[old_replacement]
+    old_data = config["replacements"][old_replacement]
+    old_words = old_data.get("words", [])
+    old_whitelist = old_data.get("whitelist", [])
     if isinstance(old_words, str):
         old_words = [old_words]
 
+    # Prepare new category data
+    new_data = {
+        "words": old_words,
+        "whitelist": old_whitelist
+    }
+
     # Merge with new category if it exists
-    if new_replacement in config:
-        if isinstance(config[new_replacement], list):
-            # Add only words not already present
-            merged_words = config[new_replacement] + [w for w in old_words if w not in config[new_replacement]]
-            config[new_replacement] = merged_words
-        else:
-            # Convert to list and merge
-            existing_word = config[new_replacement]
-            merged_words = [existing_word] + [w for w in old_words if w != existing_word]
-            config[new_replacement] = merged_words
+    if new_replacement in config["replacements"]:
+        existing_data = config["replacements"][new_replacement]
+        existing_words = existing_data.get("words", [])
+        existing_whitelist = existing_data.get("whitelist", [])
+        
+        if isinstance(existing_words, str):
+            existing_words = [existing_words]
+        
+        # Merge words and whitelist, avoiding duplicates
+        merged_words = existing_words + [w for w in old_words if w not in existing_words]
+        merged_whitelist = existing_whitelist + [w for w in old_whitelist if w not in existing_whitelist]
+        
+        config["replacements"][new_replacement] = {
+            "words": merged_words,
+            "whitelist": merged_whitelist
+        }
     else:
-        config[new_replacement] = old_words
+        config["replacements"][new_replacement] = new_data
 
     # Remove the old category
-    del config[old_replacement]
+    del config["replacements"][old_replacement]
 
     save_server_config(interaction.guild.id, config, interaction.guild.name)
     await interaction.response.send_message(
@@ -1023,12 +1076,15 @@ class ConfirmationView(View):
         config, forbidden = load_server_config(self.guild_id, self.guild_name)
         
         # Get word count for confirmation message
-        words = config.get(self.replacement, [])
-        word_count = 1 if isinstance(words, str) else len(words)
+        data = config.get("replacements", {}).get(self.replacement, {})
+        words = data.get("words", [])
+        if isinstance(words, str):
+            words = [words]
+        word_count = len(words)
         
         # Delete the category
-        if self.replacement in config:
-            del config[self.replacement]
+        if "replacements" in config and self.replacement in config["replacements"]:
+            del config["replacements"][self.replacement]
             save_server_config(self.guild_id, config, self.guild_name)
         
         self.confirmed = True
