@@ -229,22 +229,38 @@ def load_server_config(guild_id, guild_name=None):
     existing_file = find_existing_config(guild_id, guild_name)
     
     if not existing_file:
-        return {}, {}
+        return {"replacements": {}}, {}
     
     try:
         with open(existing_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
+            
+        # Convert old format to new format if needed
+        if not isinstance(config, dict) or "replacements" not in config:
+            old_config = config
+            config = {"replacements": {}}
+            for replacement, words in old_config.items():
+                config["replacements"][replacement] = {
+                    "words": [words] if isinstance(words, str) else words,
+                    "whitelist": []
+                }
     except (json.JSONDecodeError, FileNotFoundError, UnicodeDecodeError):
-        return {}, {}
+        return {"replacements": {}}, {}
     
-    # Build forbidden dictionary
+    # Build forbidden dictionary with whitelist support
     forbidden = {}
-    for replacement, words in config.items():
+    for replacement, data in config["replacements"].items():
+        words = data.get("words", [])
+        whitelist = data.get("whitelist", [])
         if isinstance(words, str):
-            forbidden[words.lower()] = replacement
-        elif isinstance(words, list):
-            for word in words:
-                forbidden[word.lower()] = replacement
+            words = [words]
+        
+        # Add each word to the forbidden dictionary with its whitelist
+        for word in words:
+            forbidden[word.lower()] = {
+                "replacement": replacement,
+                "whitelist": [w.lower() for w in whitelist]
+            }
     
     return config, forbidden
 
@@ -252,6 +268,16 @@ def load_server_config(guild_id, guild_name=None):
 def save_server_config(guild_id, config, guild_name=None):
     new_filename = get_config_filename(guild_id, guild_name)
     temp_filename = f"{new_filename}.tmp"
+    
+    # Ensure config has the new format
+    if "replacements" not in config:
+        old_config = config
+        config = {"replacements": {}}
+        for replacement, words in old_config.items():
+            config["replacements"][replacement] = {
+                "words": [words] if isinstance(words, str) else words,
+                "whitelist": []
+            }
     
     # Write to temporary file first
     try:
@@ -331,15 +357,18 @@ def pluralize_replacement(match, replacement):
 
 # Function to detect filtered words with evasion techniques
 def detect_and_replace_words(content, forbidden):
-    """Detect and replace filtered words, handling various evasion techniques"""
+    """Detect and replace filtered words, handling various evasion techniques and whitelists"""
     if not forbidden:
         return content
 
     new_content = content
     matches_to_replace = []
     
-    # For each forbidden word, use cached patterns
-    for forbidden_word, replacement in forbidden.items():
+    # For each forbidden word, use cached patterns with whitelist support
+    for forbidden_word, filter_data in forbidden.items():
+        replacement = filter_data["replacement"]
+        whitelist = filter_data["whitelist"]
+        
         # Get cached patterns for this word
         patterns = word_filter.get_pattern(forbidden_word, replacement)
         
@@ -348,6 +377,25 @@ def detect_and_replace_words(content, forbidden):
             try:
                 for match in re.finditer(pattern, content, re.IGNORECASE):
                     matched_text = match.group(0)
+                    match_start = match.start()
+                    match_end = match.end()
+                    
+                    # Check if this match overlaps with any whitelisted phrase
+                    skip_match = False
+                    content_lower = content.lower()
+                    for whitelisted in whitelist:
+                        # Find all occurrences of the whitelisted phrase
+                        for whitelist_match in re.finditer(re.escape(whitelisted.lower()), content_lower):
+                            w_start = whitelist_match.start()
+                            w_end = whitelist_match.end()
+                            # Skip if there's any overlap
+                            if not (match_end <= w_start or match_start >= w_end):
+                                skip_match = True
+                                break
+                        if skip_match:
+                            break
+                    if skip_match:
+                        continue
                     
                     # Simple validation for evasion attempts
                     if is_evasion:
@@ -603,7 +651,11 @@ async def replacement_autocomplete(interaction: discord.Interaction, current: st
         return []
     
     config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
-    replacements = list(config.keys())
+    
+    if "replacements" not in config:
+        return []
+        
+    replacements = list(config["replacements"].keys())
     filtered = [r for r in replacements if current.lower() in r.lower()]
     return [app_commands.Choice(name=r, value=r) for r in filtered[:25]]
 
@@ -677,26 +729,28 @@ async def add_filter(
     already_filtered = []
     
     # Update config
-    if replacement in config:
-        if isinstance(config[replacement], list):
-            for word in word_list:
-                if word not in config[replacement]:
-                    config[replacement].append(word)
-                    added_words.append(word)
-                else:
-                    already_filtered.append(word)
-        else:
-            # Convert single value to list and add new words
-            existing_word = config[replacement]
-            config[replacement] = [existing_word]
-            for word in word_list:
-                if word != existing_word:
-                    config[replacement].append(word)
-                    added_words.append(word)
-                else:
-                    already_filtered.append(word)
+    if "replacements" not in config:
+        config["replacements"] = {}
+        
+    if replacement in config["replacements"]:
+        current_words = config["replacements"][replacement].get("words", [])
+        if isinstance(current_words, str):
+            current_words = [current_words]
+            
+        # Add new words if they don't exist
+        for word in word_list:
+            if word not in current_words:
+                current_words.append(word)
+                added_words.append(word)
+            else:
+                already_filtered.append(word)
+                
+        config["replacements"][replacement]["words"] = current_words
     else:
-        config[replacement] = word_list
+        config["replacements"][replacement] = {
+            "words": word_list,
+            "whitelist": []
+        }
         added_words = word_list
     
     # Save server-specific config
@@ -979,6 +1033,71 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         await interaction.response.send_message("An error occurred while executing the command.", ephemeral=True)
 
 
+# Slash command to add whitelist entries
+@app_commands.command(
+    name="addwhitelist",
+    description="Add whitelist phrases for a filtered word (admin only)."
+)
+@is_admin()
+@app_commands.autocomplete(replacement=replacement_autocomplete)
+async def add_whitelist(
+    interaction: discord.Interaction,
+    replacement: str,
+    phrases: str
+):
+    """Add whitelist phrases for a filtered word category.
+    Separate phrases with commas."""
+    
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+    
+    config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
+    replacement = replacement.strip()
+    
+    if "replacements" not in config or replacement not in config["replacements"]:
+        await interaction.response.send_message(
+            f"Replacement category '{replacement}' not found in {interaction.guild.name}.",
+            ephemeral=True
+        )
+        return
+    
+    # Split and clean phrases
+    phrase_list = [phrase.lower().strip() for phrase in phrases.split(',') if phrase.strip()]
+    
+    if not phrase_list:
+        await interaction.response.send_message("No valid phrases provided.", ephemeral=True)
+        return
+    
+    # Get current whitelist or create it
+    current_whitelist = config["replacements"][replacement].get("whitelist", [])
+    added_phrases = []
+    already_whitelisted = []
+    
+    # Add new phrases
+    for phrase in phrase_list:
+        if phrase not in current_whitelist:
+            current_whitelist.append(phrase)
+            added_phrases.append(phrase)
+        else:
+            already_whitelisted.append(phrase)
+    
+    # Update config
+    config["replacements"][replacement]["whitelist"] = current_whitelist
+    save_server_config(interaction.guild.id, config, interaction.guild.name)
+    
+    # Prepare response
+    response = []
+    if added_phrases:
+        response.append(f"Added {len(added_phrases)} phrase(s) to whitelist for '{replacement}' in {interaction.guild.name}:")
+        response.append(", ".join(f"'{phrase}'" for phrase in added_phrases))
+    
+    if already_whitelisted:
+        whitelisted_phrases = [f"'{p}'" for p in already_whitelisted]
+        response.append(f"These phrases were already whitelisted: {', '.join(whitelisted_phrases)}")
+    
+    await interaction.response.send_message("\n".join(response), ephemeral=True)
+
 # Add commands to the bot's command tree
 bot.tree.add_command(add_filter)
 bot.tree.add_command(delete_filter)
@@ -986,6 +1105,7 @@ bot.tree.add_command(delete_replacement)
 bot.tree.add_command(rename_filter)
 bot.tree.add_command(list_filters)
 bot.tree.add_command(reload_config)
+bot.tree.add_command(add_whitelist)
 
 # Error handling system
 class BotError(Exception):
