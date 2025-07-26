@@ -134,7 +134,7 @@ class WordFilter:
         patterns.append((rf'\b{re.escape(word)}s?\b', word, False))
         
         if len(word) >= 3:
-            # Combined leetspeak/wildcard pattern
+            # Combined leetspeak/wildcard/repeating pattern with looser character repeats
             leet_parts = []
             for i, char in enumerate(word):
                 char_options = [char.upper(), char.lower()]
@@ -147,7 +147,10 @@ class WordFilter:
                 if 0 < i < len(word) - 1:
                     char_options.extend(['*', '.', '-', '_', '#', '!', '?', '+', '='])
                 
-                leet_parts.append(f'[{"".join(re.escape(opt) for opt in char_options)}]')
+                # Build character pattern that allows unlimited repeats
+                # Use + to allow any number of repeats
+                char_pattern = f'[{"".join(re.escape(opt) for opt in char_options)}]'
+                leet_parts.append(f'{char_pattern}+')
             
             patterns.append((r'\b' + ''.join(leet_parts) + r's?\b', word, True))
             
@@ -419,8 +422,16 @@ def detect_and_replace_words(content, forbidden):
                         if len(clean_match) > 0 and matching_chars / len(clean_target) < 0.5:
                             continue
                         
-                        # Shouldn't be too much longer than original
-                        if len(clean_match) > len(clean_target) + 2:
+                        # Special handling for repeated characters
+                        # First, collapse repeated characters (e.g., "niggggger" -> "niger")
+                        collapsed_match = re.sub(r'(.)\1+', r'\1', clean_match)
+                        collapsed_target = re.sub(r'(.)\1+', r'\1', clean_target)
+                        
+                        # If the collapsed versions don't match in length (+/- 2 chars), 
+                        # and the original isn't just repeating a letter from the target,
+                        # then it's probably a false positive
+                        if (len(collapsed_match) > len(collapsed_target) + 2 and
+                            not any(c * 2 in clean_target for c in set(clean_match))):
                             continue
                     
                     # Determine if it's plural (simple check)
