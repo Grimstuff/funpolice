@@ -179,50 +179,49 @@ def sanitize_filename(name):
 
 # Function to get server config filename
 def get_config_filename(guild_id, guild_name=None):
-    if guild_name:
-        sanitized_name = sanitize_filename(guild_name)
-        return os.path.join(CONFIGS_DIR, f'{sanitized_name}_{guild_id}.json')
-    else:
-        return os.path.join(CONFIGS_DIR, f'{guild_id}.json')
+    return os.path.join(CONFIGS_DIR, f'{guild_id}.json')
 
 # Function to find existing config file (handles migration from old naming)
 def find_existing_config(guild_id, guild_name=None):
     """Find existing config file, checking old naming conventions and migrating if needed"""
-    # Try new naming convention first
-    if guild_name:
-        new_filename = get_config_filename(guild_id, guild_name)
-        if os.path.exists(new_filename):
-            return new_filename
-    
+    # Try new naming convention first (guild_id only)
+    new_filename = get_config_filename(guild_id, guild_name)
+    if os.path.exists(new_filename):
+        return new_filename
+
     # Check for old naming conventions and migrate them
     migration_candidates = []
-    
+
     if guild_name:
-        old_filename_1 = os.path.join(CONFIGS_DIR, f'config_{guild_id}_{sanitize_filename(guild_name)}.json')
+        old_filename_1 = os.path.join(CONFIGS_DIR, f'{sanitize_filename(guild_name)}_{guild_id}.json')
         if os.path.exists(old_filename_1):
             migration_candidates.append(old_filename_1)
-    
-    old_filename_2 = os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
+
+    old_filename_2 = os.path.join(CONFIGS_DIR, f'config_{guild_id}_{sanitize_filename(guild_name)}.json')
     if os.path.exists(old_filename_2):
         migration_candidates.append(old_filename_2)
-    
+
+    old_filename_3 = os.path.join(CONFIGS_DIR, f'config_{guild_id}.json')
+    if os.path.exists(old_filename_3):
+        migration_candidates.append(old_filename_3)
+
     root_filename = f'config_{guild_id}.json'
     if os.path.exists(root_filename):
         migration_candidates.append(root_filename)
-    
+
     # Migrate the first old file found
     if migration_candidates:
         old_file = migration_candidates[0]
         new_filename = get_config_filename(guild_id, guild_name)
-        
+
         try:
             if os.path.exists(new_filename):
                 print(f"Warning: {new_filename} already exists, skipping migration of {old_file}")
                 return new_filename
-            
+
             os.rename(old_file, new_filename)
             print(f"Migrated config file from {old_file} to {new_filename}")
-            
+
             # Clean up other old files
             for old_file_cleanup in migration_candidates[1:]:
                 try:
@@ -230,25 +229,25 @@ def find_existing_config(guild_id, guild_name=None):
                     print(f"Cleaned up old config file: {old_file_cleanup}")
                 except OSError:
                     pass
-                    
+
             return new_filename
         except OSError as e:
             print(f"Failed to migrate config file from {old_file} to {new_filename}: {e}")
             return old_file
-    
+
     return None
 
 # Function to load server-specific config
 def load_server_config(guild_id, guild_name=None):
     existing_file = find_existing_config(guild_id, guild_name)
-    
+
     if not existing_file:
         return {"replacements": {}}, {}
-    
+
     try:
         with open(existing_file, 'r', encoding='utf-8') as f:
             config = json.load(f)
-            
+
         # Convert old format to new format if needed
         if not isinstance(config, dict) or "replacements" not in config:
             old_config = config
@@ -258,9 +257,14 @@ def load_server_config(guild_id, guild_name=None):
                     "words": [words] if isinstance(words, str) else words,
                     "whitelist": []
                 }
+
+        # Store/update guild_name in config for display purposes
+        if guild_name:
+            config["guild_name"] = guild_name
+
     except (json.JSONDecodeError, FileNotFoundError, UnicodeDecodeError):
         return {"replacements": {}}, {}
-    
+
     # Build forbidden dictionary with whitelist support
     forbidden = {}
     for replacement, data in config["replacements"].items():
@@ -268,21 +272,21 @@ def load_server_config(guild_id, guild_name=None):
         whitelist = data.get("whitelist", [])
         if isinstance(words, str):
             words = [words]
-        
+
         # Add each word to the forbidden dictionary with its whitelist
         for word in words:
             forbidden[word.lower()] = {
                 "replacement": replacement,
                 "whitelist": [w.lower() for w in whitelist]
             }
-    
+
     return config, forbidden
 
 # Function to save server-specific config
 def save_server_config(guild_id, config, guild_name=None):
     new_filename = get_config_filename(guild_id, guild_name)
     temp_filename = f"{new_filename}.tmp"
-    
+
     # Ensure config has the new format
     if "replacements" not in config:
         old_config = config
@@ -292,12 +296,16 @@ def save_server_config(guild_id, config, guild_name=None):
                 "words": [words] if isinstance(words, str) else words,
                 "whitelist": []
             }
-    
+
+    # Store/update guild_name in config for display purposes
+    if guild_name:
+        config["guild_name"] = guild_name
+
     # Write to temporary file first
     try:
         with open(temp_filename, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
-        
+
         # Atomic rename
         os.replace(temp_filename, new_filename)
     except Exception as e:
