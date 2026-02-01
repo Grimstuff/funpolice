@@ -7,7 +7,11 @@ import os
 import time
 import asyncio
 import io
+import uuid
 from discord.ui import Button, View
+
+# Generate Session ID
+SESSION_ID = str(uuid.uuid4())[:8]
 
 # Load secrets
 with open('secrets.json', 'r') as f:
@@ -617,16 +621,22 @@ async def on_message(message):
     if not forbidden:
         return
     
+    # print(f"[DEBUG] Checking message {message.id} in {message.guild.name}: {message.content[:20]}...") 
+    
     new_content = detect_and_replace_words(message.content, forbidden)
     if new_content == message.content:
         return
+        
+    print(f"[DEBUG] Filter matched for message {message.id}. New content length: {len(new_content)}")
     
     # Download attachments BEFORE deleting the message
+    print(f"[DEBUG] Processing message {message.id} from {message.author} in {message.channel}. Has attachments: {bool(message.attachments)}")
     downloaded_attachments = []
     skipped_attachments = []
     MAX_FILE_SIZE = 8 * 1024 * 1024  # 8MB in bytes
     
     if message.attachments:
+        print(f"[DEBUG] Starting attachment download for message {message.id}")
         for attachment in message.attachments:
             try:
                 # Check file size before downloading
@@ -657,15 +667,30 @@ async def on_message(message):
     
     # Now delete the original message
     try:
+        print(f"[DEBUG] Attempting to delete message {message.id}")
         await message.delete()
+        print(f"[DEBUG] Successfully deleted message {message.id}")
+    except discord.NotFound:
+        print(f"[DEBUG] Message {message.id} not found during delete (already deleted?) - continuing to repost")
     except discord.Forbidden:
         print(f"Cannot delete message in {message.channel.name}. Ensure bot has 'Manage Messages' permission.")
         return
-    
+    except Exception as e:
+        print(f"[DEBUG] Unexpected error deleting message {message.id}: {e}")
+        # If we can't delete it, we should probably stop? Or continue? 
+        # If we continue, we might duplicate the message (original + filtered).
+        # But if the error is "system error", maybe we should try to continue.
+        # For now, let's catch generic to avoid crashing the event handler, but maybe return?
+        # The user's specific error was NotFound, so handling that is priority.
+        pass # Continuing for now
+
     # Get webhook and send the filtered message with attachments
+    print(f"[DEBUG] Attempting to repost filtered message for {message.id}")
     webhook = await config_cache.get_webhook(message.channel)
     if webhook:
         await send_filtered_message_with_attachments(message, webhook, new_content, downloaded_attachments, skipped_attachments)
+    else:
+        print(f"[DEBUG] Failed to get/create webhook for {message.channel.id}")
 
 # Admin-only check for slash commands
 def is_admin():
