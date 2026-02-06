@@ -341,6 +341,13 @@ def save_server_config(guild_id, config, guild_name=None):
         # Invalidate the cache for this guild
         config_cache.invalidate(guild_id)
 
+# Function to suppress embeds in text by wrapping URLs in <>
+def suppress_links(text):
+    """Wrap URLs in <> to suppress embeds"""
+    # Regex to find URLs not already wrapped in <>
+    # This matches http/https URLs and wraps them in <...>
+    return re.sub(r'(?<!<)(https?://[^\s]+)(?!>)', r'<\1>', text)
+
 # Function to normalize text for evasion detection
 def normalize_text(text):
     """Normalize text by removing special characters and converting leetspeak"""
@@ -553,6 +560,7 @@ async def handle_reply(message, new_content):
             return (new_content, None)
 
         replied_content = replied_msg.content or "*[message had no text content]*"
+        replied_content = suppress_links(replied_content)
         replied_content = replied_content[:100] + "..." if len(replied_content) > 100 else replied_content
         
         prefix = f"> {replied_msg.author.mention}" if not replied_msg.author.bot else f"> **{replied_msg.author.display_name}**"
@@ -595,6 +603,7 @@ async def send_filtered_message_with_attachments(message, webhook, new_content, 
                 replied_msg = await message.channel.fetch_message(message.reference.message_id)
                 if replied_msg:
                     replied_content = replied_msg.content or "*[message had no text content]*"
+                    replied_content = suppress_links(replied_content)
                     replied_content = replied_content[:100] + "..." if len(replied_content) > 100 else replied_content
                     
                     prefix = f"> {replied_msg.author.mention}" if not replied_msg.author.bot else f"> **{replied_msg.author.display_name}**"
