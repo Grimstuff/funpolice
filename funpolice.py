@@ -57,15 +57,16 @@ class ConfigCache:
         cache_key = f"{guild_id}"
         cached = self.configs.get(cache_key)
         if cached and (time.time() - cached['timestamp']) < self.cache_timeout:
-            return cached['config'], cached['forbidden']
+            return cached['config'], cached['forbidden'], cached.get('admin_config', {})
             
-        config, forbidden = load_server_config(guild_id, guild_name)
+        config, forbidden, admin_config = load_server_config(guild_id, guild_name)
         self.configs[cache_key] = {
             'config': config,
             'forbidden': forbidden,
+            'admin_config': admin_config,
             'timestamp': time.time()
         }
-        return config, forbidden
+        return config, forbidden, admin_config
         
     def invalidate(self, guild_id: int):
         cache_key = f"{guild_id}"
@@ -246,7 +247,7 @@ def load_server_config(guild_id, guild_name=None):
     existing_file = find_existing_config(guild_id, guild_name)
 
     if not existing_file:
-        return {"replacements": {}}, {}
+        return {"replacements": {}, "admin_config": {}}, {}, {}
 
     try:
         with open(existing_file, 'r', encoding='utf-8') as f:
@@ -255,19 +256,23 @@ def load_server_config(guild_id, guild_name=None):
         # Convert old format to new format if needed
         if not isinstance(config, dict) or "replacements" not in config:
             old_config = config
-            config = {"replacements": {}}
+            config = {"replacements": {}, "admin_config": {}}
             for replacement, words in old_config.items():
                 config["replacements"][replacement] = {
                     "words": [words] if isinstance(words, str) else words,
                     "whitelist": []
                 }
 
+        # Ensure admin_config exists
+        if "admin_config" not in config:
+            config["admin_config"] = {}
+
         # Store/update guild_name in config for display purposes
         if guild_name:
             config["guild_name"] = guild_name
 
     except (json.JSONDecodeError, FileNotFoundError, UnicodeDecodeError):
-        return {"replacements": {}}, {}
+        return {"replacements": {}, "admin_config": {}}, {}, {}
 
     # Build forbidden dictionary with whitelist support
     forbidden = {}
@@ -284,7 +289,7 @@ def load_server_config(guild_id, guild_name=None):
                 "whitelist": [w.lower() for w in whitelist]
             }
 
-    return config, forbidden
+    return config, forbidden, config.get("admin_config", {})
 
 # Function to save server-specific config
 def save_server_config(guild_id, config, guild_name=None):
@@ -310,8 +315,20 @@ def save_server_config(guild_id, config, guild_name=None):
         with open(temp_filename, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
 
-        # Atomic rename
-        os.replace(temp_filename, new_filename)
+        # Atomic rename with retry logic for Windows file locking
+        retries = 5
+        for i in range(retries):
+            try:
+                if os.path.exists(new_filename):
+                    os.replace(temp_filename, new_filename)
+                else:
+                    os.rename(temp_filename, new_filename)
+                break
+            except (PermissionError, OSError) as e:
+                if i == retries - 1:
+                    raise e
+                time.sleep(0.1)
+                
     except Exception as e:
         # Clean up temp file if it exists
         if os.path.exists(temp_filename):
@@ -481,6 +498,19 @@ def detect_and_replace_words(content, forbidden):
     
     return new_content
 
+# Helper to parse duration string
+def parse_duration(duration_str):
+    if not duration_str: return None
+    match = re.match(r'(\d+)([dhms])', duration_str.lower())
+    if not match: return None
+    val, unit = match.groups()
+    val = int(val)
+    if unit == 'd': return val * 86400
+    if unit == 'h': return val * 3600
+    if unit == 'm': return val * 60
+    if unit == 's': return val
+    return None
+
 # Function to get or create a webhook
 async def get_webhook(channel):
     try:
@@ -496,6 +526,7 @@ async def get_webhook(channel):
 # Set up the bot with intents and caches
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 bot = commands.Bot(command_prefix='__funpolice__', intents=intents, help_command=None)
 
 # Initialize caches
@@ -615,13 +646,13 @@ async def send_filtered_message_with_attachments(message, webhook, new_content, 
 async def on_message(message):
     if not should_process_message(message):
         return
-    
+
     # Load server-specific config from cache
-    config, forbidden = config_cache.get(message.guild.id, message.guild.name)
+    config, forbidden, _ = config_cache.get(message.guild.id, message.guild.name)
     if not forbidden:
         return
     
-    # print(f"[DEBUG] Checking message {message.id} in {message.guild.name}: {message.content[:20]}...") 
+    # print(f"[DEBUG] Checking message {message.id} in {message.guild.name}: {message.content[:20]}...")
     
     new_content = detect_and_replace_words(message.content, forbidden)
     if new_content == message.content:
@@ -705,7 +736,7 @@ async def replacement_autocomplete(interaction: discord.Interaction, current: st
     if not interaction.guild:
         return []
     
-    config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, _, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
     if not config or "replacements" not in config:
         return []
@@ -768,7 +799,7 @@ async def add_filter(
         return
     
     # Load server-specific config
-    config, forbidden = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, forbidden, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
     # Normalize inputs
     replacement = replacement.strip()
@@ -840,7 +871,7 @@ async def delete_filter(
         return
     
     # Load server-specific config
-    config, forbidden = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, forbidden, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
     word = word.lower().strip()
     found = False
@@ -891,7 +922,7 @@ async def delete_replacement(
         return
     
     # Load server-specific config
-    config, forbidden = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, forbidden, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
     replacement = replacement.strip()
     
@@ -935,7 +966,7 @@ async def reload_config(interaction: discord.Interaction):
         return
     
     try:
-        config, forbidden = load_server_config(interaction.guild.id, interaction.guild.name)
+        config, forbidden, _ = load_server_config(interaction.guild.id, interaction.guild.name)
         await interaction.response.send_message(f"Config file reloaded successfully for {interaction.guild.name}.", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"Failed to reload config for {interaction.guild.name}: {str(e)}", ephemeral=True)
@@ -953,7 +984,7 @@ async def list_filters(interaction: discord.Interaction):
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
     
-    config, forbidden = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, forbidden, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     
     if not config:
         await interaction.response.send_message(f"No filters found for {interaction.guild.name}.", ephemeral=True)
@@ -1019,7 +1050,7 @@ async def rename_filter(
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
 
-    config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, _, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     old_replacement = old_replacement.strip()
     new_replacement = new_replacement.strip()
 
@@ -1069,6 +1100,272 @@ async def rename_filter(
         ephemeral=True
     )    
 
+# --- Administrative Features ---
+
+# Slash command to configure join role
+@app_commands.command(
+    name="joinrole",
+    description="Configure the auto-role assignment for new members (admin only)."
+)
+@is_admin()
+async def join_role_config(
+    interaction: discord.Interaction,
+    join_role: discord.Role,
+    user_role: discord.Role = None,
+    duration: str = None
+):
+    """
+    Configure the role assigned when a user joins.
+    - join_role: The role given immediately on join.
+    - user_role: (Optional) The role given after the duration expires.
+    - duration: (Optional) How long to keep the join role (e.g., '3d', '12h'). Defaults to 3d if user_role is set.
+    """
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    # Load config
+    config, _, admin_config = load_server_config(interaction.guild.id, interaction.guild.name)
+    
+    # Process inputs
+    duration_seconds = None
+    if user_role:
+        if duration:
+            duration_seconds = parse_duration(duration)
+            if not duration_seconds:
+                await interaction.response.send_message("Invalid duration format. Use '3d', '12h', '30m', etc.", ephemeral=True)
+                return
+        else:
+            duration_seconds = 3 * 86400  # Default 3 days
+    
+    # Update config
+    if "join_system" not in admin_config:
+        admin_config["join_system"] = {}
+        
+    admin_config["join_system"] = {
+        "join_role_id": join_role.id,
+        "user_role_id": user_role.id if user_role else None,
+        "duration_seconds": duration_seconds,
+        "enabled": True
+    }
+    
+    config["admin_config"] = admin_config
+    save_server_config(interaction.guild.id, config, interaction.guild.name)
+    
+    # Response
+    msg = f"✅ Join role set to {join_role.mention}."
+    if user_role:
+        if duration_seconds >= 86400:
+            val = duration_seconds / 86400
+            unit = "days"
+        elif duration_seconds >= 3600:
+            val = duration_seconds / 3600
+            unit = "hours"
+        elif duration_seconds >= 60:
+            val = duration_seconds / 60
+            unit = "minutes"
+        else:
+            val = duration_seconds
+            unit = "seconds"
+            
+        # Format to remove .0 if it's a whole number
+        val_str = f"{val:.1f}"
+        if val_str.endswith('.0'):
+            val_str = val_str[:-2]
+            
+        msg += f"\nMembers will be promoted to {user_role.mention} after {val_str} {unit}."
+    else:
+        msg += "\nNo auto-promotion configured (members keep the role indefinitely)."
+        
+    await interaction.response.send_message(msg, ephemeral=True)
+
+# Event handler for member join
+@bot.event
+async def on_member_join(member):
+    try:
+        _, _, admin_config = config_cache.get(member.guild.id, member.guild.name)
+        
+        # Check for jail evasion
+        jail_system = admin_config.get("jail_system", {})
+        jailed_users = jail_system.get("jailed_users", {})
+        jail_role_id = jail_system.get("jail_role_id")
+        
+        if str(member.id) in jailed_users and jail_role_id:
+            jail_role = member.guild.get_role(jail_role_id)
+            if jail_role:
+                await member.add_roles(jail_role, reason="Re-jailed on join (evasion attempt)")
+                print(f"Re-jailed evasion attempt: {member.display_name} in {member.guild.name}")
+                return  # Skip join role assignment for jailed users
+
+        # Join Role Logic
+        join_system = admin_config.get("join_system", {})
+        
+        if not join_system.get("enabled", False):
+            return
+            
+        join_role_id = join_system.get("join_role_id")
+        if not join_role_id:
+            return
+            
+        role = member.guild.get_role(join_role_id)
+        if role:
+            await member.add_roles(role, reason="Auto-role on join")
+            print(f"Assigned join role {role.name} to {member.display_name} in {member.guild.name}")
+        else:
+            print(f"Join role ID {join_role_id} not found in {member.guild.name}")
+            
+    except Exception as e:
+        log_error(e, f"Error in on_member_join for {member.guild.name}")
+
+# Event handler for member updates (roles) to handle manual jail/unjail
+@bot.event
+async def on_member_update(before, after):
+    if before.roles == after.roles:
+        return
+        
+    try:
+        guild = after.guild
+        # We need the full config object for saving, but we can read from cache first
+        # Actually for updates that lead to saves, we probably want fresh config anyway to avoid race conditions
+        # But for the initial check (is jail configured?), cache is fine.
+        # However, since we might WRITE, we should eventually load fresh.
+        # Let's stick to load_server_config for the WRITE path to be safe,
+        # but we can optimize the early exit?
+        # Given this event fires OFTEN, optimization is good.
+        
+        _, _, cached_admin = config_cache.get(guild.id, guild.name)
+        if not cached_admin.get("jail_system", {}).get("jail_role_id"):
+             return
+
+        # Now load fresh for the actual logic to ensure we don't overwrite concurrent changes
+        config, _, admin_config = load_server_config(guild.id, guild.name)
+        jail_system = admin_config.get("jail_system", {})
+        jail_role_id = jail_system.get("jail_role_id")
+        
+        if not jail_role_id:
+            return
+            
+        jail_role = guild.get_role(jail_role_id)
+        if not jail_role:
+            return
+            
+        # Check if jail role was added or removed
+        was_jailed = jail_role in before.roles
+        is_jailed = jail_role in after.roles
+        
+        # Manual Jail Detection (Role added, but user not in DB yet)
+        if not was_jailed and is_jailed:
+            jailed_users = jail_system.get("jailed_users", {})
+            user_id_str = str(after.id)
+            
+            # Only process if not already known to be jailed (avoids loop with /jail command)
+            if user_id_str not in jailed_users:
+                print(f"Manual jail detected for {after.display_name}")
+                
+                # Save previous roles (excluding managed/everyone and the jail role itself)
+                saved_roles = [r.id for r in before.roles
+                              if not r.is_default() and not r.managed and r.id != jail_role_id]
+                
+                jailed_users[user_id_str] = saved_roles
+                jail_system["jailed_users"] = jailed_users
+                config["admin_config"]["jail_system"] = jail_system
+                save_server_config(guild.id, config, guild.name)
+                
+                # Strip other roles
+                roles_to_keep = [jail_role]
+                # We might need to keep other managed roles that we can't remove
+                for r in after.roles:
+                    if r.managed or r.is_default():
+                        roles_to_keep.append(r)
+                
+                # Only edit if we actually need to remove something
+                if len(after.roles) > len(roles_to_keep):
+                    await after.edit(roles=roles_to_keep, reason="Manual Jail - Stripping roles")
+
+        # Manual Unjail Detection (Role removed, and user IS in DB)
+        elif was_jailed and not is_jailed:
+            jailed_users = jail_system.get("jailed_users", {})
+            user_id_str = str(after.id)
+            
+            if user_id_str in jailed_users:
+                print(f"Manual unjail detected for {after.display_name}")
+                
+                # Restore roles
+                saved_role_ids = jailed_users[user_id_str]
+                roles_to_add = []
+                for rid in saved_role_ids:
+                    r = guild.get_role(rid)
+                    if r:
+                        roles_to_add.append(r)
+                
+                # Remove from DB
+                del jailed_users[user_id_str]
+                jail_system["jailed_users"] = jailed_users
+                config["admin_config"]["jail_system"] = jail_system
+                save_server_config(guild.id, config, guild.name)
+                
+                # Apply roles
+                if roles_to_add:
+                    await after.add_roles(*roles_to_add, reason="Manual Unjail - Restoring roles")
+
+    except Exception as e:
+        log_error(e, f"Error in on_member_update for {after.guild.name}")
+
+# Background task to check for role promotion
+async def check_join_roles_task():
+    while True:
+        try:
+            await asyncio.sleep(900)  # Check every 15 minutes
+            
+            for guild in bot.guilds:
+                try:
+                    # Use cache for read-only background task
+                    _, _, admin_config = config_cache.get(guild.id, guild.name)
+                    join_system = admin_config.get("join_system", {})
+                    
+                    if not join_system.get("enabled", False):
+                        continue
+                        
+                    join_role_id = join_system.get("join_role_id")
+                    user_role_id = join_system.get("user_role_id")
+                    duration = join_system.get("duration_seconds")
+                    
+                    if not (join_role_id and user_role_id and duration):
+                        continue
+                        
+                    join_role = guild.get_role(join_role_id)
+                    user_role = guild.get_role(user_role_id)
+                    
+                    if not (join_role and user_role):
+                        continue
+                        
+                    # Check members with the join role
+                    current_time = time.time()
+                    for member in join_role.members:
+                        # Skip if they already have the user role
+                        if user_role in member.roles:
+                            continue
+                            
+                        # Check time in role (using joined_at as proxy since we add it on join)
+                        if member.joined_at:
+                            joined_ts = member.joined_at.timestamp()
+                            if current_time - joined_ts > duration:
+                                try:
+                                    await member.remove_roles(join_role, reason="Join role expired")
+                                    await member.add_roles(user_role, reason="Promoted from join role")
+                                    print(f"Promoted {member.display_name} in {guild.name}")
+                                except discord.Forbidden:
+                                    print(f"Permission error promoting {member.display_name} in {guild.name}")
+                                except Exception as e:
+                                    log_error(e, f"Error promoting {member.display_name}")
+                                    
+                except Exception as e:
+                    log_error(e, f"Error processing join roles for guild {guild.id}")
+                    
+        except Exception as e:
+            log_error(e, "Fatal error in check_join_roles_task")
+            await asyncio.sleep(60)
+
 # Periodic cache cleanup task
 async def cleanup_cache_task():
     while True:
@@ -1082,6 +1379,8 @@ async def cleanup_cache_task():
 async def setup_hook():
     # Start cache cleanup task
     bot.loop.create_task(cleanup_cache_task())
+    # Start join role checker
+    bot.loop.create_task(check_join_roles_task())
 
 # Add setup hook to bot
 bot.setup_hook = setup_hook
@@ -1115,7 +1414,7 @@ class ConfirmationView(View):
     @discord.ui.button(label="Confirm Deletion", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         # Load server config
-        config, forbidden = load_server_config(self.guild_id, self.guild_name)
+        config, forbidden, _ = load_server_config(self.guild_id, self.guild_name)
         
         # Get word count for confirmation message
         data = config.get("replacements", {}).get(self.replacement, {})
@@ -1145,10 +1444,15 @@ class ConfirmationView(View):
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("You need administrator permissions to use this command.", ephemeral=True)
+        msg = "You need administrator permissions to use this command."
     else:
         print(f"Error in slash command: {error}")
-        await interaction.response.send_message("An error occurred while executing the command.", ephemeral=True)
+        msg = "An error occurred while executing the command."
+        
+    if interaction.response.is_done():
+        await interaction.followup.send(msg, ephemeral=True)
+    else:
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 # Slash command to add whitelist entries
@@ -1170,7 +1474,7 @@ async def add_whitelist(
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
     
-    config, _ = load_server_config(interaction.guild.id, interaction.guild.name)
+    config, _, _ = load_server_config(interaction.guild.id, interaction.guild.name)
     replacement = replacement.strip()
     
     if "replacements" not in config or replacement not in config["replacements"]:
@@ -1224,6 +1528,168 @@ bot.tree.add_command(rename_filter)
 bot.tree.add_command(list_filters)
 bot.tree.add_command(reload_config)
 bot.tree.add_command(add_whitelist)
+bot.tree.add_command(join_role_config)
+
+# Slash command to configure jail role
+@app_commands.command(
+    name="setjailrole",
+    description="Set the role used for jailing users (admin only)."
+)
+@is_admin()
+async def set_jail_role(
+    interaction: discord.Interaction,
+    role: discord.Role
+):
+    """Set the jail role."""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    config, _, admin_config = load_server_config(interaction.guild.id, interaction.guild.name)
+    
+    if "jail_system" not in admin_config:
+        admin_config["jail_system"] = {}
+        
+    admin_config["jail_system"]["jail_role_id"] = role.id
+    # Ensure jailed_users dict exists
+    if "jailed_users" not in admin_config["jail_system"]:
+        admin_config["jail_system"]["jailed_users"] = {}
+        
+    config["admin_config"] = admin_config
+    save_server_config(interaction.guild.id, config, interaction.guild.name)
+    
+    await interaction.response.send_message(f"✅ Jail role set to {role.mention}.", ephemeral=True)
+
+# Slash command to jail a user
+@app_commands.command(
+    name="jail",
+    description="Jail a user, stripping their roles."
+)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(reason="The reason for jailing (visible to everyone)")
+async def jail_user(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    reason: str = None
+):
+    """Jail a user."""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    # Defer response as this might take a moment
+    await interaction.response.defer(ephemeral=False)
+
+    config, _, admin_config = load_server_config(interaction.guild.id, interaction.guild.name)
+    jail_system = admin_config.get("jail_system", {})
+    jail_role_id = jail_system.get("jail_role_id")
+    
+    if not jail_role_id:
+        await interaction.followup.send("❌ No jail role configured. Use /setjailrole first.")
+        return
+        
+    jail_role = interaction.guild.get_role(jail_role_id)
+    if not jail_role:
+        await interaction.followup.send("❌ Configured jail role no longer exists.")
+        return
+
+    # Check if already jailed
+    jailed_users = jail_system.get("jailed_users", {})
+    if str(user.id) in jailed_users:
+        await interaction.followup.send(f"{user.mention} is already jailed.")
+        return
+        
+    # Save roles
+    saved_roles = [r.id for r in user.roles
+                  if not r.is_default() and not r.managed and r.id != jail_role_id]
+    
+    # Update DB first (to prevent manual-jail detection in on_member_update)
+    jailed_users[str(user.id)] = saved_roles
+    jail_system["jailed_users"] = jailed_users
+    # Ensure config structure is complete
+    if "jail_system" not in admin_config: admin_config["jail_system"] = jail_system
+    config["admin_config"] = admin_config
+    save_server_config(interaction.guild.id, config, interaction.guild.name)
+    
+    try:
+        # Strip roles and add jail role
+        roles_to_keep = [jail_role]
+        for r in user.roles:
+            if r.managed or r.is_default():
+                roles_to_keep.append(r)
+        
+        reason_text = reason or "No reason provided"
+        await user.edit(roles=roles_to_keep, reason=f"Jailed by {interaction.user.display_name}: {reason_text}")
+        await interaction.followup.send(f"🚨 {user.mention} has been jailed.\n**Reason:** {reason_text}")
+        
+    except discord.Forbidden:
+        # Rollback DB if permission error
+        del jailed_users[str(user.id)]
+        save_server_config(interaction.guild.id, config, interaction.guild.name)
+        await interaction.followup.send("❌ Failed to jail user: Missing permissions (Bot role must be higher than user role).")
+    except Exception as e:
+        log_error(e, "Error executing jail command")
+        await interaction.followup.send("❌ An unexpected error occurred.")
+
+# Slash command to unjail a user
+@app_commands.command(
+    name="unjail",
+    description="Unjail a user and restore their roles."
+)
+@app_commands.default_permissions(manage_roles=True)
+async def unjail_user(
+    interaction: discord.Interaction,
+    user: discord.Member
+):
+    """Unjail a user."""
+    if not interaction.guild:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    config, _, admin_config = load_server_config(interaction.guild.id, interaction.guild.name)
+    jail_system = admin_config.get("jail_system", {})
+    jailed_users = jail_system.get("jailed_users", {})
+    
+    if str(user.id) not in jailed_users:
+        await interaction.followup.send(f"{user.mention} is not currently jailed (according to bot records).")
+        return
+        
+    # Get saved roles
+    saved_role_ids = jailed_users[str(user.id)]
+    roles_to_add = []
+    for rid in saved_role_ids:
+        r = interaction.guild.get_role(rid)
+        if r:
+            roles_to_add.append(r)
+            
+    jail_role_id = jail_system.get("jail_role_id")
+    jail_role = interaction.guild.get_role(jail_role_id) if jail_role_id else None
+            
+    try:
+        # Update DB first (to prevent manual-unjail detection)
+        del jailed_users[str(user.id)]
+        save_server_config(interaction.guild.id, config, interaction.guild.name)
+        
+        # Restore roles and remove jail role
+        await user.add_roles(*roles_to_add, reason=f"Unjailed by {interaction.user.display_name}")
+        
+        if jail_role and jail_role in user.roles:
+            await user.remove_roles(jail_role, reason="Unjail")
+            
+        await interaction.followup.send(f"🕊️ {user.mention} has been released.")
+        
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Failed to unjail user: Missing permissions.")
+    except Exception as e:
+        log_error(e, "Error executing unjail command")
+        await interaction.followup.send("❌ An unexpected error occurred.")
+
+# Add commands to tree
+bot.tree.add_command(set_jail_role)
+bot.tree.add_command(jail_user)
+bot.tree.add_command(unjail_user)
 
 # Error handling system
 class BotError(Exception):
